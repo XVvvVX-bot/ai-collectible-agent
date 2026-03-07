@@ -46,6 +46,22 @@ cd "F:\AI Agent"
 python .\test_zhaoonline_api.py --secret zhao123 --status 2 --page 1 --page-size 10
 ```
 
+4. Run one raw-ingestion cycle (status `1` + `2`):
+
+```powershell
+python .\scripts\ingestion\run_raw_ingestion.py --secret zhao123 --call-budget-per-run 30 --fresh-pages-per-status 2
+```
+
+The command prints run coverage details including:
+- `calls_used`
+- `inserted_by_status`
+- `pages_fetched_by_status`
+- `completed_by_status` (true means the status reached an end-of-data condition)
+- `next_page_by_status` (cursor for next run deep crawl continuation)
+
+Raw ingestion is duplicate-safe:
+- identical rows (same `source_platform`, `fetch_status`, `source_listing_id`, and payload hash) are ignored on reruns
+
 ## Development Workflow
 
 1. Keep `main` stable and protected.
@@ -71,9 +87,8 @@ python .\test_zhaoonline_api.py --secret zhao123 --status 2 --page 1 --page-size
 
 ## Next Steps
 
-1. Implement ingestion job for `status=1` and `status=2`.
-2. Normalize raw payload into `market_listings_norm`.
-3. Build matching engine (`user_items` + `user_preferences`).
-4. Generate daily report sections and immediate alerts.
+1. Normalize raw payload into `market_listings_norm`.
+2. Build matching engine (`user_items` + `user_preferences`).
+3. Generate daily report sections and immediate alerts.
 
 CI test
