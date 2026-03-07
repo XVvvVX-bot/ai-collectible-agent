@@ -83,6 +83,12 @@ python .\scripts\taxonomy\bootstrap_zhaoonline_taxonomy.py --db-path data/agent.
 python .\scripts\taxonomy\report_unmapped_zhaoonline_taxonomy.py --db-path data/agent.db --top-n-per-field 20 --sample-size 3
 ```
 
+8. Run normalized-data quality checks:
+
+```powershell
+python .\scripts\quality\run_norm_quality_checks.py --db-path data/agent.db --batch-size 2000
+```
+
 ## Development Workflow
 
 1. Keep `main` stable and protected.
