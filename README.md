@@ -75,3 +75,5 @@ python .\test_zhaoonline_api.py --secret zhao123 --status 2 --page 1 --page-size
 2. Normalize raw payload into `market_listings_norm`.
 3. Build matching engine (`user_items` + `user_preferences`).
 4. Generate daily report sections and immediate alerts.
+
+CI test
