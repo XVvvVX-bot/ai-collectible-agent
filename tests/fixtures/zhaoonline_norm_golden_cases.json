@@ -1,0 +1,129 @@
+[
+  {
+    "name": "live_with_end_price_and_times",
+    "source_listing_id": "g-001",
+    "fetch_status": "2",
+    "fetched_at": "2026-03-07T00:00:00+00:00",
+    "payload_hash": "g-hash-001",
+    "payload": {
+      "id": 1,
+      "auctionNo": "A-001",
+      "name": "Lot One",
+      "status": "2",
+      "auctionType": "1",
+      "auctionCategoryId": 178,
+      "auctionCharacterId": 3,
+      "descr": "desc one",
+      "picPath": "https://img/one.jpg",
+      "startAt": 1772415282000,
+      "endAt": 1772871300000,
+      "initialPrice": 100.0,
+      "endPrice": 120.0
+    },
+    "expected": {
+      "auction_no": "A-001",
+      "title": "Lot One",
+      "status_raw": "2",
+      "status_norm": "live",
+      "auction_type_norm": "auction",
+      "category_raw": "178",
+      "series_raw": "3",
+      "description": "desc one",
+      "image_url": "https://img/one.jpg",
+      "start_at": "2026-03-02T01:34:42+00:00",
+      "end_at": "2026-03-07T08:15:00+00:00",
+      "price_initial": 100.0,
+      "price_end": 120.0,
+      "price_current": 120.0,
+      "currency": "CNY",
+      "is_active": 1
+    }
+  },
+  {
+    "name": "fallback_to_title_fetch_status_and_images",
+    "source_listing_id": "g-002",
+    "fetch_status": "1",
+    "fetched_at": "2026-03-07T00:10:00+00:00",
+    "payload_hash": "g-hash-002",
+    "payload": {
+      "id": 2,
+      "title": "Fallback Title",
+      "auctionType": "9",
+      "images": [
+        {
+          "url": "https://img/two.jpg"
+        }
+      ],
+      "initialPrice": "88.5"
+    },
+    "expected": {
+      "title": "Fallback Title",
+      "status_raw": "1",
+      "status_norm": "preview",
+      "auction_type_norm": null,
+      "image_url": "https://img/two.jpg",
+      "price_initial": 88.5,
+      "price_end": null,
+      "price_current": 88.5,
+      "is_active": 1
+    }
+  },
+  {
+    "name": "taxonomy_override_precedence",
+    "source_listing_id": "g-003",
+    "fetch_status": "2",
+    "fetched_at": "2026-03-07T00:20:00+00:00",
+    "payload_hash": "g-hash-003",
+    "taxonomy": [
+      {
+        "field_name": "status",
+        "raw_value": "2",
+        "norm_value": "hot_live"
+      },
+      {
+        "field_name": "category",
+        "raw_value": "178",
+        "norm_value": "stamp"
+      },
+      {
+        "field_name": "series",
+        "raw_value": "3",
+        "norm_value": "wen-series"
+      },
+      {
+        "field_name": "auction_type",
+        "raw_value": "1",
+        "norm_value": "timed_auction"
+      }
+    ],
+    "payload": {
+      "id": 3,
+      "name": "Taxonomy Lot",
+      "status": "2",
+      "auctionType": "1",
+      "auctionCategoryId": 178,
+      "auctionCharacterId": 3,
+      "initialPrice": 10
+    },
+    "expected": {
+      "status_norm": "hot_live",
+      "category_norm": "stamp",
+      "series_norm": "wen-series",
+      "auction_type_norm": "timed_auction"
+    }
+  },
+  {
+    "name": "missing_title_is_skipped",
+    "source_listing_id": "g-004",
+    "fetch_status": "2",
+    "fetched_at": "2026-03-07T00:30:00+00:00",
+    "payload_hash": "g-hash-004",
+    "payload": {
+      "id": 4,
+      "status": "2",
+      "initialPrice": 5
+    },
+    "expected_skip": true
+  }
+]
+
