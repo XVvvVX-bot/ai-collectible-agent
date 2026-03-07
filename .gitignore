@@ -1,0 +1,37 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Env / Secrets
+.env
+.env.*
+!.env.example
+
+# Local runtime artifacts
+logs/*
+!logs/.gitkeep
+reports/*
+!reports/.gitkeep
+data/*
+!data/.gitkeep
+
+# Build / temp
+build/
+dist/
+*.log
+*.tmp
+
