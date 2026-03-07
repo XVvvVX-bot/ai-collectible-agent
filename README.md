@@ -89,6 +89,26 @@ python .\scripts\taxonomy\report_unmapped_zhaoonline_taxonomy.py --db-path data/
 python .\scripts\quality\run_norm_quality_checks.py --db-path data/agent.db --batch-size 2000
 ```
 
+9. Import holdings/watchlist from CSV/Excel (preview by default):
+
+```powershell
+python .\scripts\importers\import_user_items.py --db-path data/agent.db --user-id u_001 --file-path data/user_items.csv
+```
+
+Add `--commit` to apply writes.
+
+10. Run matching engine V1:
+
+```powershell
+python .\scripts\matching\run_v1_matching.py --db-path data/agent.db --user-id u_001 --min-score 30
+```
+
+11. Run rule-based signal generation:
+
+```powershell
+python .\scripts\signals\run_rule_signals.py --db-path data/agent.db --user-id u_001 --cooldown-hours 24 --freshness-hours 24 --price-move-threshold-pct 10
+```
+
 ## Development Workflow
 
 1. Keep `main` stable and protected.
@@ -111,10 +131,12 @@ python .\scripts\quality\run_norm_quality_checks.py --db-path data/agent.db --ba
 - source-agnostic V1 schema drafted
 - initial SQL migration added
 - Zhaoonline diagnostic tooling added
+- raw ingestion + normalization + taxonomy bootstrap + quality checks implemented
+- user domain services implemented for deterministic upsert and lifecycle control
 
 ## Next Steps
 
-1. Build matching engine (`user_items` + `user_preferences`).
-2. Generate daily report sections and immediate alerts.
+1. Build CSV/Excel intake on top of `UserDomainService`.
+2. Build matching engine and rule-based signal generation.
 
 CI test
