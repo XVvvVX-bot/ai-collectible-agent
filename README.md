@@ -71,6 +71,18 @@ Raw ingestion is duplicate-safe:
 python .\scripts\normalization\run_zhaoonline_normalization.py --batch-size 500
 ```
 
+6. Build provisional taxonomy mappings from currently unmapped values:
+
+```powershell
+python .\scripts\taxonomy\bootstrap_zhaoonline_taxonomy.py --db-path data/agent.db --top-n-per-field 100 --apply
+```
+
+7. View unmapped taxonomy values (for technician follow-up / governance loop):
+
+```powershell
+python .\scripts\taxonomy\report_unmapped_zhaoonline_taxonomy.py --db-path data/agent.db --top-n-per-field 20 --sample-size 3
+```
+
 ## Development Workflow
 
 1. Keep `main` stable and protected.
