@@ -52,6 +52,9 @@ python .\test_zhaoonline_api.py --secret zhao123 --status 2 --page 1 --page-size
 python .\scripts\ingestion\run_raw_ingestion.py --secret zhao123 --call-budget-per-run 30 --fresh-pages-per-status 2
 ```
 
+By default, this command also runs raw-to-norm normalization immediately after ingestion.
+Use `--skip-normalization` to disable it for a run.
+
 The command prints run coverage details including:
 - `calls_used`
 - `inserted_by_status`
@@ -61,6 +64,12 @@ The command prints run coverage details including:
 
 Raw ingestion is duplicate-safe:
 - identical rows (same `source_platform`, `fetch_status`, `source_listing_id`, and payload hash) are ignored on reruns
+
+5. Normalize newly ingested raw rows into `market_listings_norm` (manual fallback):
+
+```powershell
+python .\scripts\normalization\run_zhaoonline_normalization.py --batch-size 500
+```
 
 ## Development Workflow
 
@@ -87,8 +96,7 @@ Raw ingestion is duplicate-safe:
 
 ## Next Steps
 
-1. Normalize raw payload into `market_listings_norm`.
-2. Build matching engine (`user_items` + `user_preferences`).
-3. Generate daily report sections and immediate alerts.
+1. Build matching engine (`user_items` + `user_preferences`).
+2. Generate daily report sections and immediate alerts.
 
 CI test

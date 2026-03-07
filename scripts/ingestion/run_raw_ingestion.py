@@ -16,6 +16,7 @@ if str(SRC_DIR) not in sys.path:
 from ai_agent.clients.zhaoonline import ZhaoClient
 from ai_agent.config import ZhaoConfig
 from ai_agent.ingestion.raw_ingest import FileRateLimiter, RawIngestionJob
+from ai_agent.normalization.zhaoonline_norm import normalize_zhaoonline_raw
 from ai_agent.storage.sqlite_raw_store import SqliteRawStore
 
 
@@ -33,6 +34,12 @@ def main() -> int:
     parser.add_argument("--rate-limit-state-path", default=cfg.rate_limit_state_path)
     parser.add_argument("--call-budget-per-run", type=int, default=30)
     parser.add_argument("--fresh-pages-per-status", type=int, default=2)
+    parser.add_argument("--normalization-batch-size", type=int, default=1000000)
+    parser.add_argument(
+        "--skip-normalization",
+        action="store_true",
+        help="Skip raw-to-norm normalization after ingestion.",
+    )
     args = parser.parse_args()
 
     client = ZhaoClient(
@@ -56,6 +63,12 @@ def main() -> int:
         fresh_pages_per_status=args.fresh_pages_per_status,
     )
     result = job.run_once()
+    normalization = None
+    if not args.skip_normalization:
+        normalization = normalize_zhaoonline_raw(
+            db_path=args.db_path,
+            batch_size=args.normalization_batch_size,
+        )
     print(
         json.dumps(
             {
@@ -67,6 +80,16 @@ def main() -> int:
                 "pages_fetched_by_status": result.pages_fetched_by_status,
                 "completed_by_status": result.completed_by_status,
                 "next_page_by_status": result.next_page_by_status,
+                "normalization": (
+                    None
+                    if normalization is None
+                    else {
+                        "processed": normalization.processed,
+                        "upserted": normalization.upserted,
+                        "skipped": normalization.skipped,
+                        "last_raw_rowid": normalization.last_raw_rowid,
+                    }
+                ),
             },
             ensure_ascii=False,
         )
