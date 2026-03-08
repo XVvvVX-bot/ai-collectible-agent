@@ -109,6 +109,28 @@ python .\scripts\matching\run_v1_matching.py --db-path data/agent.db --user-id u
 python .\scripts\signals\run_rule_signals.py --db-path data/agent.db --user-id u_001 --cooldown-hours 24 --freshness-hours 24 --price-move-threshold-pct 10
 ```
 
+12. Run end-to-end orchestration pipeline (Step 10):
+
+```powershell
+python .\scripts\orchestration\run_pipeline.py --db-path data/agent.db --user-id u_001 --report-type daily
+```
+
+13. Scheduler-ready modes (Step 11):
+
+```powershell
+# daily full cycle
+python .\scripts\orchestration\run_scheduled_cycle.py --mode daily --db-path data/agent.db --user-id u_001
+
+# frequent alert cycle
+python .\scripts\orchestration\run_scheduled_cycle.py --mode alerts --db-path data/agent.db --user-id u_001
+```
+
+14. Operations health report:
+
+```powershell
+python .\scripts\orchestration\report_pipeline_health.py --db-path data/agent.db --recent-runs 20 --alert-window-hours 24
+```
+
 ## Development Workflow
 
 1. Keep `main` stable and protected.
