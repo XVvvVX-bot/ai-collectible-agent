@@ -26,3 +26,5 @@ jobs:
       - name: Run tests
         run: pytest -q
 
+      - name: Run orchestration smoke pipeline
+        run: python scripts/orchestration/run_smoke_pipeline.py
