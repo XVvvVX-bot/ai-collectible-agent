@@ -146,3 +146,101 @@ def test_deactivate_missing_user_items_and_preferences_upsert(tmp_path: Path):
     with sqlite3.connect(db_path) as conn:
         pref_count = conn.execute("SELECT COUNT(*) FROM user_preferences WHERE user_id = 'u-1'").fetchone()[0]
     assert pref_count == 1
+
+
+def test_demo_profile_from_report_section_zero_end_to_end(tmp_path: Path):
+    db_path = tmp_path / "agent.db"
+    service = UserDomainService(str(db_path))
+
+    # Section 0 profile in reports/report_preview_demo_u_20260307.md
+    user = service.upsert_user(
+        "demo_u_20260307",
+        display_name="Demo Collector",
+        language="zh-CN",
+        timezone="Asia/Shanghai",
+    )
+    pref = service.upsert_user_preferences(
+        "demo_u_20260307",
+        buy_rule_text="价格低于预算或明显低于起拍价时提醒",
+        sell_rule_text="价格明显高于成本时提醒",
+        high_interest_flag=True,
+        keywords=["纪94", "日本邮票", "T67"],
+        rules={"cooldown_hours": 24, "price_move_threshold_pct": 10},
+    )
+
+    h1 = service.upsert_user_item(
+        "demo_u_20260307",
+        "holding",
+        category="178",
+        series="2",
+        item_name="T67（7-6）带色标数字直角边12连新",
+        quantity=1,
+        cost_basis_total=400,
+        notes="测试持仓-1",
+    )
+    h2 = service.upsert_user_item(
+        "demo_u_20260307",
+        "holding",
+        category="178",
+        series="10",
+        item_name="纪94（8-8）新",
+        quantity=1,
+        cost_basis_total=300,
+        notes="测试持仓-2",
+    )
+    w1 = service.upsert_user_item(
+        "demo_u_20260307",
+        "watch",
+        category="471",
+        series="10",
+        item_name="日本邮票",
+        priority="normal",
+        max_buy_price=120,
+        notes="日本票低价机会",
+    )
+    w2 = service.upsert_user_item(
+        "demo_u_20260307",
+        "watch",
+        category="178",
+        series="10",
+        item_name="纪94（8-1）新",
+        priority="high",
+        max_buy_price=220,
+        notes="纪字票重点关注",
+    )
+
+    # Deterministic upsert on natural key for an existing holding.
+    h2_updated = service.upsert_user_item(
+        "demo_u_20260307",
+        "holding",
+        category="178",
+        series="10",
+        item_name="纪94（8-8）新",
+        quantity=2,
+        cost_basis_total=600,
+        notes="测试持仓-2-updated",
+    )
+    assert h2.id == h2_updated.id
+    assert h2_updated.quantity == 2.0
+    assert h2_updated.cost_basis_total == 600.0
+
+    holdings = service.list_user_items("demo_u_20260307", item_type="holding")
+    watches = service.list_user_items("demo_u_20260307", item_type="watch")
+    assert len(holdings) == 2
+    assert len(watches) == 2
+
+    # Lifecycle control: deactivate watches not in keep set.
+    changed = service.deactivate_missing_user_items(
+        "demo_u_20260307",
+        "watch",
+        keep_dedupe_keys=[w1.dedupe_key],
+    )
+    assert changed == 1
+    assert service.get_user_item(w1.id).is_active == 1
+    assert service.get_user_item(w2.id).is_active == 0
+
+    assert user.id == "demo_u_20260307"
+    assert pref.high_interest_flag == 1
+    assert json.loads(pref.keywords_json or "[]") == ["纪94", "日本邮票", "T67"]
+    assert pref.rules_json == '{"cooldown_hours":24,"price_move_threshold_pct":10}'
+    assert h1.user_id == "demo_u_20260307"

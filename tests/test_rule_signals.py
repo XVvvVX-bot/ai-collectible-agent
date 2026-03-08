@@ -121,7 +121,7 @@ def test_rule_signal_generation_buy_sell_price_move_and_cooldown(tmp_path: Path)
         str(db_path),
         user_id="u-1",
         cooldown_hours=24,
-        freshness_hours=24,
+        freshness_hours=24 * 365,
         price_move_threshold_pct=10.0,
     )
     assert first.inserted >= 4
@@ -135,7 +135,7 @@ def test_rule_signal_generation_buy_sell_price_move_and_cooldown(tmp_path: Path)
         str(db_path),
         user_id="u-1",
         cooldown_hours=24,
-        freshness_hours=24,
+        freshness_hours=24 * 365,
         price_move_threshold_pct=10.0,
     )
     assert second.inserted == 0
