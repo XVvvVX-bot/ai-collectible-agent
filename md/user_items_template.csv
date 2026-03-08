@@ -1,0 +1,5 @@
+item_type,item_name,category,series,year,grade_condition,quantity,cost_basis_total,priority,max_buy_price,notes
+holding,T130泰山新28套（一版）,173,3,,,1,800,,,来自 market_listings_norm 示例
+holding,纪6（5-3）原版新,178,3,,,1,300,,,来自 market_listings_norm 示例
+watch,T82西游记新25套（一版）,173,10,,,,,high,500,来自 market_listings_norm 示例
+watch,SB2白鱀豚小本票新二本,175,3,,,,,normal,180,来自 market_listings_norm 示例
