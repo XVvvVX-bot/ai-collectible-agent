@@ -1,102 +1,126 @@
 # AI Collectibles Intelligence Agent
 
-An intelligence system for collectibles research and decision support.
+Collectibles intelligence system focused on market monitoring, structured matching, and alert/report generation.
 
-V1 focus:
-- user holdings/interests intake (chat + CSV/Excel)
-- Zhaoonline market monitoring (`status=1` preview, `status=2` live)
-- daily report + rare high-priority immediate alerts
+The repository currently contains:
+- `ai_agent` for the V1 pipeline
+- `ai_agent_v2` for the new Zhaoonline API migration and the next matching/signal stack
 
-## Project Structure
+## Current Reality
+
+V1 is still the stable reference implementation.
+
+V2 is the active build track and already has:
+- new Zhaoonline auth/client support for the V2 API
+- V2 raw sync schema and forward incremental scheduler
+- normalized listing/event/media tables in the local V2 database
+- title parsing
+- V2 interest-profile model
+- V2 matching against `user_interests_v2` / `user_interest_targets_v2`
+- Windows Task Scheduler integration for live incremental polling
+
+V2 is not a finished replacement yet. The most important current gap is that live scheduled incremental sync currently lands raw change data only; it does not yet run a full downstream normalization + parsing + matching chain automatically.
+
+## Repository Layout
 
 ```text
 F:\AI Agent
-|-- md/                     # Product and technical documentation
-|-- migrations/             # SQL migrations
-|-- scripts/
-|   `-- diagnostics/        # API/network diagnostic scripts
+|-- md/                         # Documentation
+|   `-- v2/                     # V2-specific technical docs
+|-- migrations/                 # V1 migrations
+|-- migrations_v2/              # V2 migrations
+|-- scripts/                    # V1 scripts
+|-- scripts_v2/                 # V2 scripts
+|   |-- matching/
+|   |-- orchestration/
+|   |-- reporting/
+|   `-- windows/
 |-- src/
-|   `-- ai_agent/           # Core package
-|-- tests/                  # Unit tests
-|-- data/                   # Local artifacts (git-ignored)
-|-- reports/                # Local outputs (git-ignored)
-|-- logs/                   # Local logs (git-ignored)
-|-- pyproject.toml
+|   |-- ai_agent/               # V1 package
+|   `-- ai_agent_v2/            # V2 package
+|-- tests/                      # Test suite
+|-- data/                       # Local runtime data (git-ignored)
+|-- reports/                    # V1 report outputs (git-ignored)
+|-- reports_v2/                 # V2 report outputs (git-ignored)
 |-- .env.example
-`-- test_zhaoonline_api.py  # Compatibility launcher
+`-- pyproject.toml
 ```
 
-## Core Docs
+## Docs
 
 - [Docs Index](./md/README.md)
-- [Project Context](./md/PROJECT_CONTEXT.md)
-- [API Interface (Zhaoonline)](./md/API_INTERFACE_ZHAOONLINE.md)
-- [Data Dictionary (Draft)](./md/DATA_DICTIONARY_V1_DRAFT.md)
-- [Database Schema (Design)](./md/DATABASE_SCHEMA_V1.md)
-- [Database Migration (SQL)](./migrations/001_init.sql)
+- [V2 Docs Index](./md/v2/README.md)
+- [V2 Developer Quickstart](./md/v2/V2_DEVELOPER_QUICKSTART.md)
+- [V2 Current Status](./md/v2/V2_CURRENT_STATUS.md)
+- [V2 Architecture](./md/v2/V2_ARCHITECTURE.md)
+- [V2 Data Model](./md/v2/V2_DATA_MODEL.md)
+- [V2 Runtime Workflow](./md/v2/V2_RUNTIME_WORKFLOW.md)
+- [V2 Operations Runbook](./md/v2/V2_OPERATIONS_RUNBOOK.md)
+- [V2 Matching Status](./md/v2/V2_MATCHING_STATUS.md)
+- [V2 User Profile Model](./md/v2/V2_USER_PROFILE_MODEL.md)
 
-## Quick Start
+## V2 Main Scripts
 
-1. Install Python 3.11+.
-2. Copy `.env.example` to `.env`.
-3. Run diagnostics:
+Seed the curated demo user:
 
 ```powershell
 cd "F:\AI Agent"
-python .\test_zhaoonline_api.py --secret zhao123 --status 2 --page 1 --page-size 10
+.\.venv\Scripts\python.exe .\scripts_v2\orchestration\seed_v2_demo_user.py
 ```
 
-4. Run one raw-ingestion cycle (status `1` + `2`):
+Run one live V2 incremental window:
 
 ```powershell
-python .\scripts\ingestion\run_raw_ingestion.py --secret zhao123 --call-budget-per-run 30 --fresh-pages-per-status 2
+.\.venv\Scripts\python.exe .\scripts_v2\orchestration\run_v2_incremental_cycle.py --db-path data/agent_v2.db
 ```
 
-By default, this command also runs raw-to-norm normalization immediately after ingestion.
-Use `--skip-normalization` to disable it for a run.
-
-The command prints run coverage details including:
-- `calls_used`
-- `inserted_by_status`
-- `pages_fetched_by_status`
-- `completed_by_status` (true means the status reached an end-of-data condition)
-- `next_page_by_status` (cursor for next run deep crawl continuation)
-
-Raw ingestion is duplicate-safe:
-- identical rows (same `source_platform`, `fetch_status`, `source_listing_id`, and payload hash) are ignored on reruns
-
-5. Normalize newly ingested raw rows into `market_listings_norm` (manual fallback):
+Run V2 matching for one user:
 
 ```powershell
-python .\scripts\normalization\run_zhaoonline_normalization.py --batch-size 500
+.\.venv\Scripts\python.exe .\scripts_v2\matching\run_zhaoonline_v2_matching.py --db-path data/agent_v2.db --user-id demo_u_v2_curated
 ```
 
-## Development Workflow
+Build a V2 match audit report:
 
-1. Keep `main` stable and protected.
-2. Create branches per task:
-   - `feature/<topic>`
-   - `fix/<topic>`
-   - `docs/<topic>`
-3. Open a Pull Request for every merge.
-4. Keep PRs small and testable.
+```powershell
+.\.venv\Scripts\python.exe .\scripts_v2\reporting\run_zhaoonline_v2_match_audit.py --db-path data/agent_v2.db
+```
 
-## Security Rules
+Register the Windows scheduled live incremental task:
 
-- Do not commit secrets or production keys.
-- Keep API secret in environment variables only.
-- Run auth logic in backend or controlled scripts, never frontend.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts_v2\windows\register_v2_incremental_task.ps1
+```
 
-## Current Status
+## V2 Local Runtime Files
 
-- project docs initialized
-- source-agnostic V1 schema drafted
-- initial SQL migration added
-- Zhaoonline diagnostic tooling added
+- main DB: `data/agent_v2.db`
+- live secret file: `data/secrets/zhaoonline_secret.txt`
+- live scheduler log: `data/logs/zhao_v2_incremental_live.log`
+- live scheduler lock: `data/locks/zhaoonline_v2_incremental_live.lock`
+- live rate-limit state: `data/zhaoonline_v2_rate_limit_live.json`
 
-## Next Steps
+## Tests
 
-1. Build matching engine (`user_items` + `user_preferences`).
-2. Generate daily report sections and immediate alerts.
+Run the focused V2 tests:
 
-CI test
+```powershell
+.\.venv\Scripts\pytest.exe -q tests\test_v2_demo_user_seed.py tests\test_v2_interest_matching.py tests\test_v2_interest_profile_migration.py tests\test_v2_live_incremental.py tests\test_v2_matching_strictness.py
+```
+
+## Security
+
+- Do not commit real secrets.
+- Keep the Zhaoonline secret outside source control.
+- Use the local ignored path `data/secrets/zhaoonline_secret.txt` or environment variables.
+
+## Recommendation For New Developers
+
+Read these in order:
+1. [V2 Developer Quickstart](./md/v2/V2_DEVELOPER_QUICKSTART.md)
+2. [V2 Current Status](./md/v2/V2_CURRENT_STATUS.md)
+3. [V2 Architecture](./md/v2/V2_ARCHITECTURE.md)
+4. [V2 Data Model](./md/v2/V2_DATA_MODEL.md)
+5. [V2 Runtime Workflow](./md/v2/V2_RUNTIME_WORKFLOW.md)
+6. [V2 Matching Status](./md/v2/V2_MATCHING_STATUS.md)
+7. [V2 Operations Runbook](./md/v2/V2_OPERATIONS_RUNBOOK.md)
