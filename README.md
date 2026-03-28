@@ -92,7 +92,67 @@ Register the Windows scheduled live incremental task:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts_v2\windows\register_v2_incremental_task.ps1
 ```
 
-## V2 Local Runtime Files
+6. Build provisional taxonomy mappings from currently unmapped values:
+
+```powershell
+python .\scripts\taxonomy\bootstrap_zhaoonline_taxonomy.py --db-path data/agent.db --top-n-per-field 100 --apply
+```
+
+7. View unmapped taxonomy values (for technician follow-up / governance loop):
+
+```powershell
+python .\scripts\taxonomy\report_unmapped_zhaoonline_taxonomy.py --db-path data/agent.db --top-n-per-field 20 --sample-size 3
+```
+
+8. Run normalized-data quality checks:
+
+```powershell
+python .\scripts\quality\run_norm_quality_checks.py --db-path data/agent.db --batch-size 2000
+```
+
+9. Import holdings/watchlist from CSV/Excel (preview by default):
+
+```powershell
+python .\scripts\importers\import_user_items.py --db-path data/agent.db --user-id u_001 --file-path data/user_items.csv
+```
+
+Add `--commit` to apply writes.
+
+10. Run matching engine V1:
+
+```powershell
+python .\scripts\matching\run_v1_matching.py --db-path data/agent.db --user-id u_001 --min-score 30
+```
+
+11. Run rule-based signal generation:
+
+```powershell
+python .\scripts\signals\run_rule_signals.py --db-path data/agent.db --user-id u_001 --cooldown-hours 24 --freshness-hours 24 --price-move-threshold-pct 10
+```
+
+12. Run end-to-end orchestration pipeline (Step 10):
+
+```powershell
+python .\scripts\orchestration\run_pipeline.py --db-path data/agent.db --user-id u_001 --report-type daily
+```
+
+13. Scheduler-ready modes (Step 11):
+
+```powershell
+# daily full cycle
+python .\scripts\orchestration\run_scheduled_cycle.py --mode daily --db-path data/agent.db --user-id u_001
+
+# frequent alert cycle
+python .\scripts\orchestration\run_scheduled_cycle.py --mode alerts --db-path data/agent.db --user-id u_001
+```
+
+14. Operations health report:
+
+```powershell
+python .\scripts\orchestration\report_pipeline_health.py --db-path data/agent.db --recent-runs 20 --alert-window-hours 24
+```
+
+## Development Workflow
 
 - main DB: `data/agent_v2.db`
 - live secret file: `data/secrets/zhaoonline_secret.txt`
@@ -108,13 +168,19 @@ Run the focused V2 tests:
 .\.venv\Scripts\pytest.exe -q tests\test_v2_demo_user_seed.py tests\test_v2_interest_matching.py tests\test_v2_interest_profile_migration.py tests\test_v2_live_incremental.py tests\test_v2_matching_strictness.py
 ```
 
-## Security
+- project docs initialized
+- source-agnostic V1 schema drafted
+- initial SQL migration added
+- Zhaoonline diagnostic tooling added
+- raw ingestion + normalization + taxonomy bootstrap + quality checks implemented
+- user domain services implemented for deterministic upsert and lifecycle control
 
 - Do not commit real secrets.
 - Keep the Zhaoonline secret outside source control.
 - Use the local ignored path `data/secrets/zhaoonline_secret.txt` or environment variables.
 
-## Recommendation For New Developers
+1. Build CSV/Excel intake on top of `UserDomainService`.
+2. Build matching engine and rule-based signal generation.
 
 Read these in order:
 1. [V2 Developer Quickstart](./md/v2/V2_DEVELOPER_QUICKSTART.md)
