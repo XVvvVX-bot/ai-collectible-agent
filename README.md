@@ -14,12 +14,15 @@ V2 is the active build track and already has:
 - new Zhaoonline auth/client support for the V2 API
 - V2 raw sync schema and forward incremental scheduler
 - normalized listing/event/media tables in the local V2 database
+- scheduled normalization refresh for affected listings
+- scheduled parse refresh for affected listings
 - title parsing
 - V2 interest-profile model
 - V2 matching against `user_interests_v2` / `user_interest_targets_v2`
-- Windows Task Scheduler integration for live incremental polling
+- V2 signal review and digest reporting
+- Windows Task Scheduler integration for live incremental polling and daily review/reporting
 
-V2 is not a finished replacement yet. The most important current gap is that live scheduled incremental sync currently lands raw change data only; it does not yet run a full downstream normalization + parsing + matching chain automatically.
+V2 is not a finished replacement yet. The most important current gap is that live scheduled incremental sync still does not run automatic matching refresh or signal generation. The daily report tasks summarize current V2 state, but they do not generate new matches or signals by themselves.
 
 ## Repository Layout
 
@@ -92,6 +95,14 @@ Register the Windows scheduled live incremental task:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts_v2\windows\register_v2_incremental_task.ps1
 ```
 
+Register the daily review/report tasks:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts_v2\windows\register_v2_daily_user_base_review_task.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts_v2\windows\register_v2_daily_signal_review_task.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts_v2\windows\register_v2_daily_interest_digest_task.ps1
+```
+
 6. Build provisional taxonomy mappings from currently unmapped values:
 
 ```powershell
@@ -159,6 +170,9 @@ python .\scripts\orchestration\report_pipeline_health.py --db-path data/agent.db
 - live scheduler log: `data/logs/zhao_v2_incremental_live.log`
 - live scheduler lock: `data/locks/zhaoonline_v2_incremental_live.lock`
 - live rate-limit state: `data/zhaoonline_v2_rate_limit_live.json`
+- daily review log: `data/logs/v2_daily_user_base_review.log`
+- daily signal-review log: `data/logs/v2_daily_signal_review.log`
+- daily digest log: `data/logs/v2_daily_interest_digest.log`
 
 ## Tests
 

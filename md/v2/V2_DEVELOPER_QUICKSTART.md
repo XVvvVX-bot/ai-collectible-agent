@@ -20,18 +20,20 @@ V2 is the active development track.
 The safest checked-in V2 areas for a new developer are:
 
 - live incremental polling
+- post-sync normalization and parse refresh
 - profile model
 - listing parser
 - V2 matcher
 - match audit reporting
+- daily review/report automation
 - documentation
 
 The riskiest areas are the ones that are still transitional:
 
-- downstream automation after scheduled incremental sync
-- signal generation
+- automatic matching refresh after scheduled incremental sync
+- signal generation refresh cadence
 - end-user delivery
-- normalization refresh as a repeatable checked-in runtime path
+- signal/report threshold tuning
 
 ## First Read
 
@@ -109,6 +111,14 @@ Register the Windows scheduled task:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts_v2\windows\register_v2_incremental_task.ps1
 ```
 
+Register the daily logon-triggered reporting tasks:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts_v2\windows\register_v2_daily_user_base_review_task.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts_v2\windows\register_v2_daily_signal_review_task.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts_v2\windows\register_v2_daily_interest_digest_task.ps1
+```
+
 Run focused V2 tests:
 
 ```powershell
@@ -121,10 +131,13 @@ Think about V2 as four practical layers:
 
 1. scheduler and raw landing
 2. normalized market tables
-3. parse and matching
-4. future signals and delivery
+3. parse, matching, and signals
+4. review/report delivery
 
-Today, only layer 1 is fully wired into scheduled automation.
+Today:
+- layer 1 is fully wired into scheduled automation
+- daily review/report delivery is scheduled
+- matching refresh and signal generation still require explicit runs
 
 ## What To Check Before Making Changes
 
@@ -138,6 +151,8 @@ Before editing V2 code, confirm:
 ## Common Developer Mistakes To Avoid
 
 - assuming scheduled incremental sync also refreshes normalized tables
+- assuming daily signal-review tasks generate new signals
+- assuming daily digest tasks generate new matches
 - assuming `listing_matches_v2.user_item_id` always points to `user_items.id`
 - assuming historical backfill state and live state are the same thing
 - tightening broad discovery matching when the real problem is result grouping

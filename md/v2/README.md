@@ -17,17 +17,28 @@ Recommended reading order:
 
 - V2 raw sync schema
 - forward-looking incremental polling
+- scheduled normalization refresh
+- scheduled parse refresh
 - normalized V2 database tables
 - listing parse layer
 - V2 profile model
 - V2 matching on top of interest targets
-- Windows scheduled polling setup
+- signal review and digest reporting
+- Windows scheduled polling and daily review/report setup
 
 ## Important Limitation
 
-The live scheduled V2 incremental cycle currently writes raw incremental data and advances the live watermark, but it does not yet run a full automatic downstream chain for normalization, parsing, matching, or signals.
+The live scheduled V2 incremental cycle now runs:
 
-That limitation is deliberate to keep the scheduler stable while the rest of V2 is still evolving.
+- raw incremental sync
+- normalization refresh for affected listings
+- parse refresh for affected listings
+
+It does not yet run automatic matching refresh or signal generation.
+
+The daily report tasks now exist, but they report on current database state only. They do not create new matches or new signals on their own.
+
+That remaining limitation is deliberate while matching and signals are still evolving.
 
 ## Fast Orientation
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -18,6 +19,28 @@ from ai_agent_v2.storage.sqlite_store import SqliteV2Store
 MATCHER_VERSION = "v2_matcher_003"
 SUPPORTED_PARSE_FAMILIES = {"stamp_like", "coin_like"}
 STAMP_HARD_VARIANT_TOKENS = {"小型张", "型张", "版张", "带厂铭", "直角边", "色标", "双连", "四连", "方连", "折版", "再版", "一版", "二版", "三版", "四版", "M"}
+TRUSTED_STAMP_MIN_CONFIDENCE = 0.80
+TRUSTED_COIN_MIN_CONFIDENCE = 0.90
+STAMP_CODE_SCAN_RE = re.compile(r"(?:特|纪|普|文|编|J|T|N)\s*\d+[A-Z]?")
+CONDITION_RANKS = {
+    "全品": 100,
+    "未使用": 95,
+    "完全未使用品": 95,
+    "评级票": 95,
+    "评级币": 95,
+    "上品": 85,
+    "中上品": 75,
+    "中品": 65,
+    "九五品": 95,
+    "九品": 90,
+    "八五品": 85,
+    "八品": 80,
+    "七品": 70,
+    "六品": 60,
+    "五品": 50,
+    "差品": 20,
+    "修补品": 10,
+}
 
 
 @dataclass(frozen=True)
@@ -71,6 +94,7 @@ class ParsedUserItem:
     variant_tokens: list[str]
     quantity_tokens: list[str]
     condition_tokens: list[str]
+    condition_mode: str
     issue_part_token: str | None
     subject_label: str | None
     precision_mode: str
@@ -186,6 +210,8 @@ def _build_match(*, item: ParsedUserItem, listing: sqlite3.Row) -> ListingMatchR
         return None
     if item.parse_family != _clean_text(listing["parse_family"]):
         return None
+    if not _is_trusted_match_pair(item=item, listing=listing):
+        return None
     if item.parse_family == "stamp_like":
         return _build_stamp_match(item=item, listing=listing)
     if item.parse_family == "coin_like":
@@ -213,10 +239,10 @@ def _build_stamp_match(*, item: ParsedUserItem, listing: sqlite3.Row) -> Listing
         return None
 
     if item_code and listing_code and item_code == listing_code:
-        identity_score += 60.0
+        identity_score += 75.0
         reasons.append("issue_code_exact")
     if item_name and listing_name and item_name == listing_name:
-        identity_score += 30.0
+        identity_score += 70.0
         reasons.append("issue_name_exact")
     if item_series and listing_series and item_series == listing_series:
         series_score += 20.0
@@ -230,11 +256,16 @@ def _build_stamp_match(*, item: ParsedUserItem, listing: sqlite3.Row) -> Listing
 
     listing_variant_tokens = _json_list(listing["variant_tokens_json"])
     listing_quantity_tokens = _json_list(listing["quantity_tokens_json"])
+    listing_condition_tokens = _listing_condition_tokens(listing)
 
     if item.quantity_tokens and not _has_token_overlap(item.quantity_tokens, listing_quantity_tokens):
         return None
     required_variant_tokens = [token for token in item.variant_tokens if token in STAMP_HARD_VARIANT_TOKENS]
     if required_variant_tokens and not _has_token_overlap(required_variant_tokens, listing_variant_tokens):
+        return None
+    if item.condition_mode == "require" and _has_hard_condition_conflict(item.condition_tokens, listing_condition_tokens):
+        return None
+    if item.condition_mode == "require" and not _condition_requirement_satisfied(item.condition_tokens, listing_condition_tokens):
         return None
 
     variant_overlap = _overlap_count(item.variant_tokens, listing_variant_tokens)
@@ -242,19 +273,27 @@ def _build_stamp_match(*, item: ParsedUserItem, listing: sqlite3.Row) -> Listing
         variant_score += min(variant_overlap * 6.0, 12.0)
         reasons.append("variant_overlap")
 
-    condition_overlap = _overlap_count(item.condition_tokens, _json_list(listing["condition_tokens_json"]))
+    condition_overlap = _overlap_count(item.condition_tokens, listing_condition_tokens)
     if condition_overlap:
         condition_score += min(condition_overlap * 4.0, 8.0)
         reasons.append("condition_overlap")
+    if item.condition_tokens and _condition_requirement_satisfied(item.condition_tokens, listing_condition_tokens):
+        condition_score += 6.0
+        reasons.append("condition_compatible")
+    elif item.condition_tokens and item.condition_mode == "prefer" and _has_hard_condition_conflict(item.condition_tokens, listing_condition_tokens):
+        condition_score -= 6.0
+        reasons.append("condition_mismatch")
 
     has_variant_conflict = _has_token_conflict(item.variant_tokens, listing_variant_tokens)
     has_quantity_conflict = _has_token_conflict(item.quantity_tokens, listing_quantity_tokens)
+    has_code_conflict = bool(item_code and listing_code and item_code != listing_code)
 
     relationship_type: str | None = None
     if (
         not has_variant_conflict
         and not has_quantity_conflict
-        and "issue_code_exact" in reasons
+        and not has_code_conflict
+        and ("issue_code_exact" in reasons or "issue_name_exact" in reasons)
         and ("issue_name_exact" in reasons or not (item_name and listing_name))
         and ((item_part and listing_part and "issue_part_exact" in reasons) or not (item_part or listing_part))
     ):
@@ -265,11 +304,14 @@ def _build_stamp_match(*, item: ParsedUserItem, listing: sqlite3.Row) -> Listing
         relationship_type = "series_related"
 
     total_score = identity_score + series_score + variant_score + condition_score
+    single_anchor_exact = relationship_type == "exact_identity" and (("issue_code_exact" in reasons) ^ ("issue_name_exact" in reasons))
     if relationship_type is None:
         return None
     if not _relationship_allowed(item, relationship_type):
         return None
-    if relationship_type == "exact_identity" and total_score < 85.0:
+    if relationship_type == "exact_identity" and not single_anchor_exact and total_score < 85.0:
+        return None
+    if relationship_type == "exact_identity" and single_anchor_exact and total_score < 70.0:
         return None
     if relationship_type == "variant_related" and total_score < 55.0:
         return None
@@ -308,11 +350,16 @@ def _build_coin_match(*, item: ParsedUserItem, listing: sqlite3.Row) -> ListingM
     listing_year = _int_or_none(listing["year_value"])
     listing_variant_tokens = _json_list(listing["variant_tokens_json"])
     listing_quantity_tokens = _json_list(listing["quantity_tokens_json"])
+    listing_condition_tokens = _listing_condition_tokens(listing)
 
     if item.precision_mode == "exact":
         if listing_quantity_tokens and not _has_token_overlap(item.quantity_tokens, listing_quantity_tokens):
             return None
         if listing_variant_tokens and not _has_token_overlap(item.variant_tokens, listing_variant_tokens):
+            return None
+        if item.condition_mode == "require" and _has_hard_condition_conflict(item.condition_tokens, listing_condition_tokens):
+            return None
+        if item.condition_mode == "require" and not _condition_requirement_satisfied(item.condition_tokens, listing_condition_tokens):
             return None
 
     if item_theme and listing_theme and item_theme == listing_theme:
@@ -337,10 +384,16 @@ def _build_coin_match(*, item: ParsedUserItem, listing: sqlite3.Row) -> ListingM
         variant_score += 7.0
         reasons.append("finish_exact")
 
-    condition_overlap = _overlap_count(item.condition_tokens, _json_list(listing["condition_tokens_json"]))
+    condition_overlap = _overlap_count(item.condition_tokens, listing_condition_tokens)
     if condition_overlap:
         condition_score += min(condition_overlap * 4.0, 8.0)
         reasons.append("condition_overlap")
+    if item.condition_tokens and _condition_requirement_satisfied(item.condition_tokens, listing_condition_tokens):
+        condition_score += 6.0
+        reasons.append("condition_compatible")
+    elif item.condition_tokens and item.condition_mode == "prefer" and _has_hard_condition_conflict(item.condition_tokens, listing_condition_tokens):
+        condition_score -= 6.0
+        reasons.append("condition_mismatch")
 
     reason_set = set(reasons)
     relationship_type: str | None = None
@@ -386,9 +439,11 @@ def _parse_user_item(row: sqlite3.Row) -> ParsedUserItem:
     year_value = _int_or_none(row["year"])
     subject_label = _clean_text(row["subject_label"]) or item_name
     precision_mode = _clean_text(row["precision_mode"])
+    explicit_condition_mode = _clean_text(row["condition_mode"]) if "condition_mode" in row.keys() else None
     allow_series_matches = _bool_or_default(row["allow_series_matches"], default=False)
     allow_variant_matches = _bool_or_default(row["allow_variant_matches"], default=True)
-    parse_family = _classify_parse_family(item_name, category)
+    explicit_parse_family = _clean_text(row["parse_family"]) if "parse_family" in row.keys() else None
+    parse_family = explicit_parse_family if explicit_parse_family in SUPPORTED_PARSE_FAMILIES else _classify_parse_family(item_name, category)
 
     if parse_family == "stamp_like":
         parsed = _parse_stamp_title(raw_title=item_name, character_condition=grade_condition, description_character=None)
@@ -452,6 +507,7 @@ def _parse_user_item(row: sqlite3.Row) -> ParsedUserItem:
         variant_tokens=_token_values(parsed, "variant_tokens"),
         quantity_tokens=_token_values(parsed, "quantity_tokens"),
         condition_tokens=_condition_tokens(_token_values(parsed, "condition_tokens"), grade_condition),
+        condition_mode=_resolve_condition_mode(explicit_condition_mode, _token_values(parsed, "condition_tokens"), grade_condition, precision_mode),
         issue_part_token=_extract_issue_part_token(item_name),
         subject_label=subject_label,
         precision_mode=precision_mode or _default_precision_mode(item_name, issue_code_norm, _token_values(parsed, "variant_tokens"), _token_values(parsed, "quantity_tokens")),
@@ -476,6 +532,7 @@ def _load_match_subjects(conn: sqlite3.Connection, user_id: str) -> list[sqlite3
           t.id AS id,
           i.user_id AS user_id,
           CASE WHEN i.interest_kind = 'watch_sell' THEN 'holding' ELSE 'watch' END AS item_type,
+          t.parse_family AS parse_family,
           NULL AS category,
           t.series_key AS series,
           t.raw_input AS item_name,
@@ -486,6 +543,7 @@ def _load_match_subjects(conn: sqlite3.Connection, user_id: str) -> list[sqlite3
           ) AS grade_condition,
           t.target_label AS subject_label,
           COALESCE(t.strictness_override, i.precision_mode) AS precision_mode,
+          t.condition_mode AS condition_mode,
           i.allow_series_matches AS allow_series_matches,
           i.allow_variant_matches AS allow_variant_matches
         FROM user_interest_targets_v2 t
@@ -503,6 +561,7 @@ def _load_match_subjects(conn: sqlite3.Connection, user_id: str) -> list[sqlite3
           id,
           user_id,
           item_type,
+          NULL AS parse_family,
           category,
           series,
           item_name,
@@ -510,6 +569,7 @@ def _load_match_subjects(conn: sqlite3.Connection, user_id: str) -> list[sqlite3
           grade_condition,
           item_name AS subject_label,
           NULL AS precision_mode,
+          NULL AS condition_mode,
           0 AS allow_series_matches,
           1 AS allow_variant_matches
         FROM user_items
@@ -538,9 +598,11 @@ def _load_listing_candidates(conn: sqlite3.Connection, *, only_active: bool) -> 
           p.variant_tokens_json,
           p.quantity_tokens_json,
           p.condition_tokens_json,
+          p.character_condition,
           p.identity_core,
           p.year_value,
-          p.raw_title
+          p.raw_title,
+          p.parse_confidence
         FROM listing_parse_v2 p
         JOIN market_listings_norm_v2 n ON n.id = p.listing_id
         {where_sql}
@@ -579,6 +641,56 @@ def _candidate_rows(groups: dict[str, dict[str, list[sqlite3.Row]]], item: Parse
         for row in groups[group_name].get(key, []):
             candidates[str(row["listing_id"])] = row
     return list(candidates.values())
+
+
+def _is_trusted_match_pair(*, item: ParsedUserItem, listing: sqlite3.Row) -> bool:
+    if item.parse_family == "stamp_like":
+        return _is_trusted_stamp_item(item) and _is_trusted_stamp_listing(listing)
+    if item.parse_family == "coin_like":
+        return _is_trusted_coin_item(item) and _is_trusted_coin_listing(listing)
+    return False
+
+
+def _is_trusted_stamp_item(item: ParsedUserItem) -> bool:
+    if _is_composite_stamp_title(item.item_name):
+        return False
+    return bool(_clean_text(item.issue_code_norm) or _clean_text(item.issue_name))
+
+
+def _is_trusted_stamp_listing(listing: sqlite3.Row) -> bool:
+    if _float_or_default(listing["parse_confidence"], 0.0) < TRUSTED_STAMP_MIN_CONFIDENCE:
+        return False
+    if _is_composite_stamp_title(listing["raw_title"]):
+        return False
+    return bool(_clean_text(listing["issue_code_norm"]) or _clean_text(listing["issue_name"]))
+
+
+def _is_trusted_coin_item(item: ParsedUserItem) -> bool:
+    return bool(item.year_value is not None and _clean_text(item.theme_name) and _clean_text(item.asset_type))
+
+
+def _is_trusted_coin_listing(listing: sqlite3.Row) -> bool:
+    if _float_or_default(listing["parse_confidence"], 0.0) < TRUSTED_COIN_MIN_CONFIDENCE:
+        return False
+    return bool(_int_or_none(listing["year_value"]) is not None and _clean_text(listing["theme_name"]) and _clean_text(listing["asset_type"]))
+
+
+def _is_composite_stamp_title(value: Any) -> bool:
+    text = _clean_text(value)
+    if not text:
+        return False
+    normalized = text.replace("（", "(").replace("）", ")")
+    if len(STAMP_CODE_SCAN_RE.findall(normalized)) >= 2:
+        return True
+    return any(marker in normalized for marker in ("、", "，", ",", "；", ";", "各一", "混", "邮折"))
+
+
+def _listing_condition_tokens(listing: sqlite3.Row) -> list[str]:
+    tokens = _json_list(listing["condition_tokens_json"])
+    character_condition = _clean_text(listing["character_condition"])
+    if character_condition and character_condition not in tokens:
+        tokens.append(character_condition)
+    return tokens
 
 
 def _upsert_match(conn: sqlite3.Connection, *, match: ListingMatchRecord, now: str) -> str:
@@ -760,6 +872,77 @@ def _has_token_conflict(left: list[str], right: list[str]) -> bool:
     return bool(left_set and right_set and left_set != right_set)
 
 
+def _has_hard_condition_conflict(item_tokens: list[str], listing_tokens: list[str]) -> bool:
+    item_profile = _condition_profile(item_tokens)
+    listing_profile = _condition_profile(listing_tokens)
+    item_state = item_profile["state"]
+    listing_state = listing_profile["state"]
+    if item_state and listing_state and item_state != listing_state:
+        return True
+    if item_profile["certified_required"] and not listing_profile["certified"]:
+        return True
+    if item_profile["min_rank"] is not None and listing_profile["max_rank"] is not None and listing_profile["max_rank"] < item_profile["min_rank"]:
+        return True
+    return False
+
+
+def _condition_requirement_satisfied(item_tokens: list[str], listing_tokens: list[str]) -> bool:
+    if not item_tokens:
+        return True
+    item_profile = _condition_profile(item_tokens)
+    listing_profile = _condition_profile(listing_tokens)
+
+    if item_profile["state"] and listing_profile["state"] and item_profile["state"] != listing_profile["state"]:
+        return False
+    if item_profile["certified_required"] and not listing_profile["certified"]:
+        return False
+    if item_profile["min_rank"] is not None:
+        if listing_profile["max_rank"] is None:
+            return False
+        if listing_profile["max_rank"] < item_profile["min_rank"]:
+            return False
+    return True
+
+
+def _condition_profile(tokens: list[str]) -> dict[str, Any]:
+    profile = {
+        "state": None,
+        "certified": False,
+        "certified_required": False,
+        "min_rank": None,
+        "max_rank": None,
+    }
+    for token in tokens:
+        normalized = _clean_text(token)
+        if not normalized:
+            continue
+        if any(marker in normalized for marker in ("新全", "新", "未使用")):
+            profile["state"] = profile["state"] or "mint"
+        elif any(marker in normalized for marker in ("旧全", "旧")):
+            profile["state"] = profile["state"] or "used"
+        elif any(marker in normalized for marker in ("盖全", "盖")):
+            profile["state"] = profile["state"] or "cancelled"
+        elif "实寄" in normalized:
+            profile["state"] = profile["state"] or "mailed"
+
+        if "评级" in normalized:
+            profile["certified"] = True
+            profile["certified_required"] = True
+
+        rank = _condition_rank(normalized)
+        if rank is not None:
+            profile["min_rank"] = rank if profile["min_rank"] is None else max(profile["min_rank"], rank)
+            profile["max_rank"] = rank if profile["max_rank"] is None else max(profile["max_rank"], rank)
+    return profile
+
+
+def _condition_rank(token: str) -> int | None:
+    for label, rank in CONDITION_RANKS.items():
+        if label in token:
+            return rank
+    return None
+
+
 def _relationship_allowed(item: ParsedUserItem, relationship_type: str) -> bool:
     if relationship_type == "exact_identity":
         return True
@@ -775,6 +958,22 @@ def _condition_tokens(values: list[str], grade_condition: str | None) -> list[st
     if grade_condition and grade_condition not in tokens:
         tokens.append(grade_condition)
     return tokens
+
+
+def _resolve_condition_mode(
+    explicit_mode: str | None,
+    parsed_condition_tokens: list[str],
+    grade_condition: str | None,
+    precision_mode: str | None,
+) -> str:
+    if explicit_mode in {"ignore", "prefer", "require"}:
+        return explicit_mode
+    has_condition = bool(parsed_condition_tokens or _clean_text(grade_condition))
+    if not has_condition:
+        return "ignore"
+    if _clean_text(precision_mode) == "exact":
+        return "require"
+    return "prefer"
 
 
 def _token_values(parsed: dict[str, Any], field_name: str) -> list[str]:
@@ -827,6 +1026,15 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _float_or_default(value: Any, default: float) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _non_numeric_text(value: str | None) -> str | None:
