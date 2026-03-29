@@ -85,3 +85,66 @@ def test_live_incremental_cycle_bootstraps_previous_hour_and_keeps_only_meaningf
     assert state == (3600000, 7200000)
     assert raw_count == 1
     assert change_count == 1
+
+
+def test_live_incremental_cycle_processes_multiple_backlog_windows_per_run(tmp_path: Path):
+    db_path = tmp_path / "agent_v2.db"
+    SqliteV2Store(str(db_path)).ensure_schema()
+    client = _FakeClient()
+    pacer = RequestPacer(str(tmp_path / "rate_limit.json"), min_interval_sec=0)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO zhao_v2_sync_state (
+              source_platform,
+              baseline_status_filter,
+              last_baseline_started_at,
+              last_baseline_finished_at,
+              last_incremental_from_ms,
+              last_incremental_to_ms,
+              updated_at
+            ) VALUES (?, NULL, NULL, NULL, ?, ?, '2026-03-27T00:00:00+00:00')
+            """,
+            ("zhaoonline_live_test", 0, 3600000),
+        )
+        conn.commit()
+
+    result = run_live_incremental_cycle(
+        db_path=str(db_path),
+        base_url="http://example.test",
+        secret="secret",
+        client=client,
+        pacer=pacer,
+        state_source_key="zhaoonline_live_test",
+        now_ms=14400000,
+        max_windows_per_run=3,
+        sleep_fn=lambda _: None,
+    )
+
+    assert result.skipped is False
+    assert result.final_from_time_ms == 3600000
+    assert result.target_to_time_ms == 14400000
+    assert len(result.results) == 3
+    assert [row.from_time_ms for row in result.results] == [3600000, 7200000, 10800000]
+    assert [row.to_time_ms for row in result.results] == [7200000, 10800000, 14400000]
+    assert client.calls == [
+        (3600000, 7200000, 1, 500),
+        (7200000, 10800000, 1, 500),
+        (10800000, 14400000, 1, 500),
+    ]
+
+    with sqlite3.connect(db_path) as conn:
+        state = conn.execute(
+            "SELECT last_incremental_from_ms, last_incremental_to_ms FROM zhao_v2_sync_state WHERE source_platform = 'zhaoonline_live_test'"
+        ).fetchone()
+        raw_count = conn.execute("SELECT COUNT(*) FROM zhao_v2_auction_raw WHERE sync_type = 'incremental'").fetchone()[0]
+        change_count = conn.execute("SELECT COUNT(*) FROM zhao_v2_auction_change_raw").fetchone()[0]
+        run_count = conn.execute(
+            "SELECT COUNT(*) FROM zhao_v2_sync_runs WHERE source_platform = 'zhaoonline_live_test'"
+        ).fetchone()[0]
+
+    assert state == (10800000, 14400000)
+    assert raw_count == 3
+    assert change_count == 3
+    assert run_count == 3

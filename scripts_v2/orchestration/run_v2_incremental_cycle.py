@@ -29,6 +29,7 @@ def main() -> int:
     parser.add_argument("--secret-file", default="data/secrets/zhaoonline_secret.txt")
     parser.add_argument("--state-source-key", default=DEFAULT_STATE_SOURCE_KEY)
     parser.add_argument("--window-hours", type=int, default=1)
+    parser.add_argument("--max-windows-per-run", type=int, default=int(os.getenv("ZHAO_V2_MAX_WINDOWS_PER_RUN", "4")))
     parser.add_argument("--page-size", type=int, default=int(os.getenv("ZHAO_V2_PAGE_SIZE", "500")))
     parser.add_argument("--min-interval-sec", type=int, default=int(os.getenv("ZHAO_V2_MIN_INTERVAL_SEC", "60")))
     parser.add_argument("--timeout-sec", type=int, default=int(os.getenv("ZHAO_V2_REQUEST_TIMEOUT_SEC", "60")))
@@ -63,6 +64,7 @@ def main() -> int:
             secret=secret,
             state_source_key=args.state_source_key,
             window_hours=args.window_hours,
+            max_windows_per_run=args.max_windows_per_run,
             page_size=args.page_size,
             min_interval_sec=args.min_interval_sec,
             request_timeout_sec=args.timeout_sec,
@@ -81,6 +83,7 @@ def main() -> int:
                 "skip_reason": result.skip_reason,
                 "final_from_time_ms": result.final_from_time_ms,
                 "target_to_time_ms": result.target_to_time_ms,
+                "window_count": len(result.results),
                 "results": [row.__dict__ for row in result.results],
             },
             ensure_ascii=False,

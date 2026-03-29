@@ -82,6 +82,7 @@ def run_live_incremental_cycle(
     raw_source_platform: str = RAW_SOURCE_PLATFORM,
     window_hours: int = 1,
     page_size: int = 500,
+    max_windows_per_run: int = 4,
     min_interval_sec: int = 60,
     request_timeout_sec: int = 60,
     rate_limit_state_path: str = "data/zhaoonline_v2_rate_limit_live.json",
@@ -92,19 +93,46 @@ def run_live_incremental_cycle(
 ) -> LiveIncrementalCycleResult:
     SqliteV2Store(db_path).ensure_schema()
     window_ms = max(1, int(window_hours)) * 60 * 60 * 1000
+    max_windows = max(1, int(max_windows_per_run))
     pacer = pacer or RequestPacer(rate_limit_state_path, min_interval_sec, sleep_fn=sleep_fn)
     client = client or ZhaoV2Client(base_url=base_url, secret=secret, timeout_sec=request_timeout_sec)
 
     completed_hour_end_ms = _completed_hour_end_ms(now_ms)
     with sqlite3.connect(Path(db_path)) as conn:
         conn.row_factory = sqlite3.Row
-        from_time_ms, to_time_ms = _choose_next_window(
-            conn,
-            state_source_key=state_source_key,
-            completed_hour_end_ms=completed_hour_end_ms,
-            window_ms=window_ms,
-        )
-        if from_time_ms is None or to_time_ms is None:
+        results: list[LiveIncrementalWindowResult] = []
+        first_from_time_ms: int | None = None
+        last_to_time_ms: int | None = None
+
+        for _ in range(max_windows):
+            from_time_ms, to_time_ms = _choose_next_window(
+                conn,
+                state_source_key=state_source_key,
+                completed_hour_end_ms=completed_hour_end_ms,
+                window_ms=window_ms,
+            )
+            if from_time_ms is None or to_time_ms is None:
+                break
+
+            if first_from_time_ms is None:
+                first_from_time_ms = from_time_ms
+
+            result = _run_single_window(
+                conn,
+                client=client,
+                pacer=pacer,
+                raw_source_platform=raw_source_platform,
+                state_source_key=state_source_key,
+                from_time_ms=from_time_ms,
+                to_time_ms=to_time_ms,
+                page_size=page_size,
+                sleep_fn=sleep_fn,
+            )
+            conn.commit()
+            results.append(result)
+            last_to_time_ms = to_time_ms
+
+        if not results:
             return LiveIncrementalCycleResult(
                 skipped=True,
                 skip_reason="no_completed_window",
@@ -114,26 +142,13 @@ def run_live_incremental_cycle(
                 results=(),
             )
 
-        result = _run_single_window(
-            conn,
-            client=client,
-            pacer=pacer,
-            raw_source_platform=raw_source_platform,
-            state_source_key=state_source_key,
-            from_time_ms=from_time_ms,
-            to_time_ms=to_time_ms,
-            page_size=page_size,
-            sleep_fn=sleep_fn,
-        )
-        conn.commit()
-
     return LiveIncrementalCycleResult(
         skipped=False,
         skip_reason=None,
         state_source_key=state_source_key,
-        final_from_time_ms=from_time_ms,
-        target_to_time_ms=to_time_ms,
-        results=(result,),
+        final_from_time_ms=first_from_time_ms,
+        target_to_time_ms=last_to_time_ms,
+        results=tuple(results),
     )
 
 

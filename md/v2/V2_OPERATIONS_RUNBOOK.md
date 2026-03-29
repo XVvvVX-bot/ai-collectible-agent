@@ -54,7 +54,8 @@ Python entrypoint:
 The scheduled task:
 - runs every 30 minutes
 - uses a lock file to avoid overlap
-- polls one completed 1-hour incremental window per run
+- polls completed 1-hour incremental windows
+- can process multiple backlog windows in one run, up to a safe cap
 - writes only meaningful raw changes
 - advances the live watermark under `source_platform='zhaoonline_live'`
 
@@ -76,6 +77,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts_v2\windows\registe
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts_v2\orchestration\run_v2_incremental_cycle.py --db-path data/agent_v2.db
+```
+
+### Run A Faster Catch-Up Cycle Manually
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts_v2\orchestration\run_v2_incremental_cycle.py --db-path data/agent_v2.db --max-windows-per-run 4
 ```
 
 ### Seed Curated Demo User
@@ -153,6 +160,7 @@ Symptom:
 Current protection:
 - local pacer spacing
 - retry after `429`
+- capped windows per run instead of unlimited catch-up
 
 ### Backfill State Confusion
 
