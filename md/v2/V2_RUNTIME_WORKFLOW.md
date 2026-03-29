@@ -27,15 +27,16 @@ Windows scheduled wrapper:
 2. acquire a local lock
 3. read live watermark from `zhao_v2_sync_state` using `source_platform='zhaoonline_live'`
 4. choose the next completed 1-hour window
-5. call `/api/search/auctions/incremental`
-6. keep only meaningful rows where `oldStatus != newStatus`
-7. write raw rows to:
+5. process up to a safe capped number of completed windows in one run when backlog exists
+6. call `/api/search/auctions/incremental`
+7. keep only meaningful rows where `oldStatus != newStatus`
+8. write raw rows to:
    - `zhao_v2_auction_raw`
    - `zhao_v2_auction_change_raw`
-8. write telemetry to:
+9. write telemetry to:
    - `zhao_v2_sync_runs`
    - `zhao_v2_sync_run_pages`
-9. advance the live watermark on success
+10. advance the live watermark after each successfully completed window
 
 ### What It Does Not Yet Do
 
@@ -92,6 +93,12 @@ Important current note:
 ### Live Ops Path
 
 scheduled incremental -> raw tables -> watermark
+
+Current catch-up behavior:
+
+- task trigger frequency is every 30 minutes
+- each successful cycle can now process multiple completed 1-hour windows
+- the safe cap is controlled by `ZHAO_V2_MAX_WINDOWS_PER_RUN` or `--max-windows-per-run`
 
 ### Developer Review Path
 
