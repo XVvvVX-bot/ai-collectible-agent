@@ -1,0 +1,30 @@
+services:
+  - type: worker
+    name: ai-agent-v2-worker
+    env: python
+    plan: starter
+    buildCommand: pip install .
+    startCommand: python scripts_v2/orchestration/run_v2_background_worker.py --runtime-root /opt/render/project/src/runtime --timezone Asia/Shanghai
+    disk:
+      name: ai-agent-v2-runtime
+      mountPath: /opt/render/project/src/runtime
+      sizeGB: 5
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: ZHAO_V2_BASE_URL
+        value: http://zhaoonline.hk:8888
+      - key: ZHAO_V2_SECRET
+        sync: false
+      - key: APP_INCREMENTAL_CHECK_MINUTES
+        value: "10"
+      - key: APP_DAILY_CHECK_MINUTES
+        value: "60"
+      - key: APP_DAILY_LOOKBACK_HOURS
+        value: "24"
+      - key: APP_LOOP_SLEEP_SECONDS
+        value: "60"
+      - key: ZHAO_V2_MAX_WINDOWS_PER_RUN
+        value: "4"
+      - key: ZHAO_V2_MIN_INTERVAL_SEC
+        value: "60"
