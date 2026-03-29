@@ -11,21 +11,28 @@ These parts are present in the source tree and are usable:
 - Zhaoonline V2 auth and API client
 - live incremental polling runner
 - Windows scheduled task wrapper for live incremental polling
+- post-sync normalization module and runner
+- post-sync parse refresh module and runner
+- post-sync normalization refresh
+- post-sync parse refresh
 - V2 schema migrations currently checked in under `migrations_v2`
 - V2 interest profile model
 - curated demo user seeding
 - listing parser module
 - V2 matcher
+- V2 signal engine
 - V2 match audit reporting
+- V2 signal review reporting
+- V2 interest digest reporting
+- Windows scheduled daily review/report tasks
 
 ## Transitional Or Incomplete
 
 These parts are not yet a clean fully checked-in end-to-end operational path:
 
-- automatic normalization after each scheduled incremental run
-- automatic parsing refresh after each scheduled incremental run
 - automatic matching refresh after each scheduled incremental run
-- signal generation and delivery
+- automatic signal generation refresh after live sync
+- user-facing delivery beyond developer-review reports
 - one-command end-to-end V2 orchestration
 
 ## Important Reality About Data Layers
@@ -44,10 +51,20 @@ Current scheduled behavior is narrower:
 
 - fetch one completed incremental window
 - keep meaningful raw changes
+- normalize affected listings
+- refresh parse rows for affected listings
 - write sync telemetry
 - advance the live watermark
 
-That is all.
+Matching refresh and signal generation are still outside the scheduled live-sync path.
+
+Separately, V2 now also has logon-triggered once-per-day reporting tasks that generate:
+
+- a daily user-base review
+- a daily per-user signal-review batch
+- a daily per-user interest-digest batch
+
+Those reporting tasks summarize current database state only.
 
 ## What Exists In Source Vs What Exists In Local Data
 
@@ -65,7 +82,7 @@ Checked-in source currently includes:
 - `scripts_v2/matching/run_zhaoonline_v2_matching.py`
 - `scripts_v2/reporting/run_zhaoonline_v2_match_audit.py`
 
-The repo does not currently expose a checked-in standalone normalization runner in `scripts_v2`, and it does not currently expose a checked-in standalone parsing runner in `scripts_v2`.
+The repo now exposes checked-in standalone normalization and parsing runners in `scripts_v2`.
 
 So if a developer sees normalized or parsed data in `data/agent_v2.db`, they should treat that as existing local state, not as proof that the full refresh path is already automated.
 
@@ -88,6 +105,12 @@ The live scheduler is intended to be the only background automation that keeps r
 Current task:
 
 - `AI Agent V2 Incremental Sync`
+
+Current reporting tasks:
+
+- `AI Agent V2 Daily Review`
+- `AI Agent V2 Daily Signal Review`
+- `AI Agent V2 Daily Interest Digest`
 
 Current live state key:
 
@@ -115,7 +138,7 @@ not:
 
 If a new developer wants to help, the highest-value areas are:
 
-1. integrated downstream refresh after live incremental sync
-2. signal generation on top of `user_interests_v2`
-3. grouped opportunity reporting to reduce match multiplicity
+1. automatic matching refresh after live incremental sync
+2. automatic signal refresh on top of `user_interests_v2`
+3. tighter grouping/ranking for review reports
 4. cleanup of remaining transitional runtime paths

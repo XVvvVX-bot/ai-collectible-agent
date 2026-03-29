@@ -5,7 +5,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from ai_agent_v2.clients.zhaoonline import now_utc_iso
 from ai_agent_v2.storage.sqlite_store import SqliteV2Store
@@ -76,20 +76,33 @@ class ParseRunResult:
     family_counts: dict[str, int]
 
 
-def run_listing_parse_v2(db_path: str) -> ParseRunResult:
+def run_listing_parse_v2(db_path: str, *, source_listing_ids: Sequence[str] | None = None) -> ParseRunResult:
     SqliteV2Store(db_path).ensure_schema()
     now = now_utc_iso()
     with sqlite3.connect(Path(db_path)) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT id, source_platform, source_listing_id, title, category_name_raw, character_name_raw, description_character
-            FROM market_listings_norm_v2
-            WHERE source_platform = ?
-            ORDER BY source_listing_id
-            """,
-            (SOURCE_PLATFORM,),
-        ).fetchall()
+        if source_listing_ids:
+            placeholders = ",".join("?" for _ in source_listing_ids)
+            rows = conn.execute(
+                f"""
+                SELECT id, source_platform, source_listing_id, title, category_name_raw, character_name_raw, description_character
+                FROM market_listings_norm_v2
+                WHERE source_platform = ?
+                  AND source_listing_id IN ({placeholders})
+                ORDER BY source_listing_id
+                """,
+                (SOURCE_PLATFORM, *source_listing_ids),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, source_platform, source_listing_id, title, category_name_raw, character_name_raw, description_character
+                FROM market_listings_norm_v2
+                WHERE source_platform = ?
+                ORDER BY source_listing_id
+                """,
+                (SOURCE_PLATFORM,),
+            ).fetchall()
         parse_rows = [_parse_listing_row(row) for row in rows]
         family_counts: dict[str, int] = {}
         for row in parse_rows:

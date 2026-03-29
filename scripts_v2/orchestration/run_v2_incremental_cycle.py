@@ -16,6 +16,7 @@ if str(SRC_DIR) not in sys.path:
 
 from ai_agent_v2.config import ZhaoV2Config
 from ai_agent_v2.ingestion.live_incremental import DEFAULT_STATE_SOURCE_KEY, FileLock, run_live_incremental_cycle
+from ai_agent_v2.orchestration.post_sync_refresh import run_post_sync_refresh
 
 
 def main() -> int:
@@ -73,6 +74,43 @@ def main() -> int:
     finally:
         lock.release()
 
+    post_sync_payload = None
+    total_inserted = sum(row.change_events_inserted for row in result.results)
+    if result.results and total_inserted > 0:
+        try:
+            post_sync = run_post_sync_refresh(
+                args.db_path,
+                sync_run_ids=[row.sync_run_id for row in result.results],
+            )
+            post_sync_payload = {
+                "sync_run_ids": list(post_sync.sync_run_ids),
+                "normalization": post_sync.normalization.__dict__,
+                "parsing": {
+                    "processed": post_sync.parsing.processed,
+                    "upserted": post_sync.parsing.upserted,
+                    "family_counts": post_sync.parsing.family_counts,
+                },
+            }
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "db_path": args.db_path,
+                        "state_source_key": result.state_source_key,
+                        "skipped": result.skipped,
+                        "skip_reason": result.skip_reason,
+                        "final_from_time_ms": result.final_from_time_ms,
+                        "target_to_time_ms": result.target_to_time_ms,
+                        "window_count": len(result.results),
+                        "results": [row.__dict__ for row in result.results],
+                        "post_sync_error": str(exc),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 1
+
     print(
         json.dumps(
             {
@@ -85,6 +123,7 @@ def main() -> int:
                 "target_to_time_ms": result.target_to_time_ms,
                 "window_count": len(result.results),
                 "results": [row.__dict__ for row in result.results],
+                "post_sync": post_sync_payload,
             },
             ensure_ascii=False,
         )

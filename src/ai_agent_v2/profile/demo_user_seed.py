@@ -38,6 +38,7 @@ class DemoInterestSpec:
     variant_tokens: tuple[str, ...]
     quantity_tokens: tuple[str, ...]
     condition_tokens: tuple[str, ...]
+    condition_mode: str
     budget_min: float | None
     budget_max: float | None
     strictness_override: str | None
@@ -112,6 +113,7 @@ DEFAULT_DEMO_INTEREST_SPECS: tuple[DemoInterestSpec, ...] = (
         variant_tokens=("普制", "31.104克"),
         quantity_tokens=(),
         condition_tokens=("评级币",),
+        condition_mode="require",
         budget_min=None,
         budget_max=1850.0,
         strictness_override="exact",
@@ -153,6 +155,7 @@ DEFAULT_DEMO_INTEREST_SPECS: tuple[DemoInterestSpec, ...] = (
         variant_tokens=(),
         quantity_tokens=(),
         condition_tokens=(),
+        condition_mode="ignore",
         budget_min=None,
         budget_max=2200.0,
         strictness_override="broad",
@@ -194,6 +197,7 @@ DEFAULT_DEMO_INTEREST_SPECS: tuple[DemoInterestSpec, ...] = (
         variant_tokens=(),
         quantity_tokens=(),
         condition_tokens=("新全",),
+        condition_mode="prefer",
         budget_min=None,
         budget_max=260.0,
         strictness_override="balanced",
@@ -235,6 +239,7 @@ DEFAULT_DEMO_INTEREST_SPECS: tuple[DemoInterestSpec, ...] = (
         variant_tokens=("型张", "M"),
         quantity_tokens=(),
         condition_tokens=("新", "全品"),
+        condition_mode="require",
         budget_min=None,
         budget_max=420.0,
         strictness_override="exact",
@@ -276,6 +281,7 @@ DEFAULT_DEMO_INTEREST_SPECS: tuple[DemoInterestSpec, ...] = (
         variant_tokens=("型张", "M"),
         quantity_tokens=(),
         condition_tokens=("新", "全品"),
+        condition_mode="require",
         budget_min=None,
         budget_max=None,
         strictness_override="exact",
@@ -410,13 +416,15 @@ def _upsert_demo_defaults(conn: sqlite3.Connection, *, now: str) -> None:
           default_allow_related_matches,
           default_allow_series_matches,
           default_allow_variant_matches,
+          default_condition_mode,
           notes,
           created_at,
           updated_at
-        ) VALUES (?, 'CNY', 'balanced', 'daily_digest', 70, 24, 0, 1, 1, ?, ?, ?)
+        ) VALUES (?, 'CNY', 'balanced', 'daily_digest', 70, 24, 0, 1, 1, 'ignore', ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
           default_allow_series_matches = excluded.default_allow_series_matches,
           default_allow_variant_matches = excluded.default_allow_variant_matches,
+          default_condition_mode = excluded.default_condition_mode,
           notes = excluded.notes,
           updated_at = excluded.updated_at
         """,
@@ -559,6 +567,7 @@ def _insert_target(
           variant_tokens_json,
           quantity_tokens_json,
           condition_tokens_json,
+          condition_mode,
           year_value,
           budget_min,
           budget_max,
@@ -567,7 +576,7 @@ def _insert_target(
           is_active,
           created_at,
           updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         """,
         (
             str(uuid.uuid4()),
@@ -585,6 +594,7 @@ def _insert_target(
             _json_text(spec.variant_tokens),
             _json_text(spec.quantity_tokens),
             _json_text(spec.condition_tokens),
+            spec.condition_mode,
             int(listing["year_value"]) if spec.use_year_value and listing["year_value"] is not None else None,
             spec.budget_min,
             spec.budget_max,
@@ -727,4 +737,3 @@ def _text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text if text else None
-
