@@ -113,10 +113,12 @@ def main() -> int:
         runtime=runner.start_event()["runtime"],
         routes=[
             "/",
+            "/matches",
             "/healthz",
             "/api/reports",
             "/api/users/<user_id>/profile",
             "/api/users/<user_id>/reports",
+            "/api/users/<user_id>/matches",
             "/api/users/<user_id>/signals",
             "/api/users/<user_id>/digest/latest",
             "/api/users/<user_id>/matching/run",
@@ -161,6 +163,16 @@ def build_handler(
             if user_route is not None:
                 user_id, action = user_route
                 self._handle_user_api_get(user_id=user_id, action=action, query=parse_qs(parsed.query))
+                return
+            if path == "/matches":
+                matches_user_id = first_query_value(parse_qs(parsed.query), "user_id") or default_user_id
+                self._write_html(
+                    HTTPStatus.OK,
+                    render_matches_html(
+                        db_path=db_path,
+                        user_id=matches_user_id,
+                    ),
+                )
                 return
             if path == "/":
                 dashboard_user_id = first_query_value(parse_qs(parsed.query), "user_id") or default_user_id
@@ -231,6 +243,10 @@ def build_handler(
                     return
                 if action == "reports":
                     payload = load_user_reports_payload(reports_dir, user_id=user_id)
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+                if action == "matches":
+                    payload = load_user_matches_payload(db_path, user_id=user_id)
                     self._write_json(HTTPStatus.OK, payload)
                     return
                 if action == "signals":
@@ -685,6 +701,174 @@ def load_user_signals_payload(
     }
 
 
+def load_user_matches_payload(
+    db_path: Path,
+    *,
+    user_id: str,
+) -> dict[str, object]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        user_row = conn.execute(
+            """
+            SELECT id, display_name, language, timezone
+            FROM users
+            WHERE id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        if user_row is None:
+            raise ValueError(f"user not found: {user_id}")
+
+        match_rows = conn.execute(
+            """
+            SELECT
+              lm.id,
+              lm.listing_id,
+              lm.user_item_id,
+              lm.item_type,
+              lm.relationship_type,
+              lm.match_score,
+              lm.identity_score,
+              lm.series_score,
+              lm.variant_score,
+              lm.condition_score,
+              lm.match_reasons_json,
+              lm.matched_at,
+              lm.updated_at,
+              i.id AS interest_id,
+              i.interest_name,
+              i.interest_kind,
+              i.interest_priority,
+              t.target_label,
+              t.budget_max,
+              h.raw_input AS holding_label,
+              h.cost_basis_unit,
+              n.source_listing_id,
+              n.title AS listing_title,
+              n.status_norm AS listing_status,
+              COALESCE(n.price_end, n.price_initial) AS listing_price,
+              n.price_end,
+              n.updated_at AS listing_updated_at,
+              n.end_at,
+              n.category_name_raw,
+              n.character_name_raw
+            FROM listing_matches_v2 lm
+            JOIN market_listings_norm_v2 n ON n.id = lm.listing_id
+            LEFT JOIN user_interest_targets_v2 t ON t.id = lm.user_item_id
+            LEFT JOIN user_holdings_v2 h ON h.id = lm.user_item_id
+            LEFT JOIN user_interests_v2 i ON i.id = COALESCE(t.interest_id, h.linked_interest_id)
+            WHERE lm.user_id = ? AND lm.status = 'active'
+            ORDER BY
+              lm.match_score DESC,
+              CASE n.status_norm WHEN 'live' THEN 1 WHEN 'preview' THEN 2 WHEN 'ended' THEN 3 ELSE 4 END,
+              lm.updated_at DESC,
+              n.title
+            """,
+            (user_id,),
+        ).fetchall()
+
+    matches: list[dict[str, object]] = []
+    relationship_counts = {"exact_identity": 0, "variant_related": 0, "series_related": 0}
+    status_counts = {"live": 0, "preview": 0, "ended": 0, "other": 0}
+    high_score_count = 0
+    groups: dict[str, dict[str, object]] = {}
+
+    for row in match_rows:
+        match = normalize_sqlite_row(row)
+        reasons = parse_json_list(match.pop("match_reasons_json", None))
+        relationship = str(match.get("relationship_type") or "other")
+        listing_status = str(match.get("listing_status") or "other")
+        relationship_counts[relationship] = relationship_counts.get(relationship, 0) + 1
+        status_counts[listing_status if listing_status in status_counts else "other"] += 1
+        score = float(match.get("match_score") or 0.0)
+        if score >= 120.0:
+            high_score_count += 1
+
+        target_label = match.get("target_label") or match.get("holding_label") or match.get("interest_name")
+        price = match.get("listing_price")
+        budget_max = match.get("budget_max")
+        cost_basis_unit = match.get("cost_basis_unit")
+        opportunity_note = build_match_opportunity_note(
+            relationship_type=relationship,
+            listing_status=listing_status,
+            listing_price=price,
+            budget_max=budget_max,
+            cost_basis_unit=cost_basis_unit,
+        )
+        match["match_reasons"] = reasons
+        match["target_label"] = target_label
+        match["opportunity_note"] = opportunity_note
+        matches.append(match)
+
+        group_key = "|".join(
+            [
+                str(match.get("interest_id") or ""),
+                relationship,
+                listing_status,
+                str(match.get("listing_title") or ""),
+            ]
+        )
+        group = groups.setdefault(
+            group_key,
+            {
+                "interest_id": match.get("interest_id"),
+                "interest_name": match.get("interest_name"),
+                "interest_kind": match.get("interest_kind"),
+                "interest_priority": match.get("interest_priority"),
+                "relationship_type": relationship,
+                "listing_status": listing_status,
+                "listing_title": match.get("listing_title"),
+                "target_label": target_label,
+                "listing_count": 0,
+                "top_match_score": 0.0,
+                "price_min": None,
+                "price_max": None,
+                "sample_source_listing_ids": [],
+            },
+        )
+        group["listing_count"] = int(group["listing_count"]) + 1
+        group["top_match_score"] = max(float(group["top_match_score"]), score)
+        if price is not None:
+            current_min = group.get("price_min")
+            current_max = group.get("price_max")
+            group["price_min"] = price if current_min is None else min(float(current_min), float(price))
+            group["price_max"] = price if current_max is None else max(float(current_max), float(price))
+        sample_ids = group.get("sample_source_listing_ids")
+        if isinstance(sample_ids, list) and len(sample_ids) < 4 and match.get("source_listing_id"):
+            sample_ids.append(match.get("source_listing_id"))
+
+    opportunity_groups = sorted(
+        groups.values(),
+        key=lambda item: (
+            relationship_rank(str(item.get("relationship_type") or "")),
+            status_rank(str(item.get("listing_status") or "")),
+            -float(item.get("top_match_score") or 0.0),
+            -int(item.get("listing_count") or 0),
+            str(item.get("interest_name") or ""),
+        ),
+    )
+
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "user": normalize_sqlite_row(user_row),
+        "summary": {
+            "active_match_count": len(matches),
+            "high_score_count": high_score_count,
+            "live_count": status_counts.get("live", 0),
+            "preview_count": status_counts.get("preview", 0),
+            "ended_count": status_counts.get("ended", 0),
+            "exact_count": relationship_counts.get("exact_identity", 0),
+            "variant_count": relationship_counts.get("variant_related", 0),
+            "series_count": relationship_counts.get("series_related", 0),
+            "opportunity_group_count": len(opportunity_groups),
+        },
+        "matches": matches,
+        "top_matches": matches[:12],
+        "opportunity_groups": opportunity_groups[:12],
+    }
+
+
 def load_latest_digest_payload(
     *,
     db_path: Path,
@@ -938,6 +1122,56 @@ def safe_child(parent: Path, name: str) -> Path | None:
     return candidate
 
 
+def relationship_rank(value: str) -> int:
+    if value == "exact_identity":
+        return 1
+    if value == "variant_related":
+        return 2
+    if value == "series_related":
+        return 3
+    return 4
+
+
+def status_rank(value: str) -> int:
+    if value == "live":
+        return 1
+    if value == "preview":
+        return 2
+    if value == "ended":
+        return 3
+    return 4
+
+
+def parse_json_list(value: object) -> list[str]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed]
+
+
+def build_match_opportunity_note(
+    *,
+    relationship_type: str,
+    listing_status: str,
+    listing_price: object,
+    budget_max: object,
+    cost_basis_unit: object,
+) -> str | None:
+    fragments = [format_relationship_type_label(relationship_type), format_listing_status_label(listing_status)]
+    if listing_price is not None:
+        fragments.append(f"price {listing_price}")
+    if budget_max is not None:
+        fragments.append(f"budget max {budget_max}")
+    if cost_basis_unit is not None:
+        fragments.append(f"cost basis {cost_basis_unit}")
+    return " | ".join(fragment for fragment in fragments if fragment)
+
+
 def render_dashboard_html(
     *,
     db_path: Path,
@@ -953,6 +1187,7 @@ def render_dashboard_html(
         user_id=user_id,
         lookback_hours=lookback_hours,
     )
+    matches_payload = load_user_matches_payload(db_path, user_id=user_id)
     digest_payload = load_latest_digest_payload(
         db_path=db_path,
         reports_dir=reports_dir,
@@ -971,6 +1206,12 @@ def render_dashboard_html(
         user_id=user_id,
         signal_review_metadata=(reports_payload.get("latest") or {}).get("signal_review") if isinstance(reports_payload.get("latest"), dict) else None,
     )
+    top_opportunity_groups = matches_payload["opportunity_groups"][:3] if isinstance(matches_payload.get("opportunity_groups"), list) else []
+    opportunity_cards_html = "\n".join(
+        render_opportunity_group_card(group, user_id=user_id)
+        for group in top_opportunity_groups
+        if isinstance(group, dict)
+    ) or '<p class="empty-state">No opportunity groups available yet.</p>'
     interest_cards_html = "\n".join(render_interest_card(interest) for interest in interests) or '<p class="empty-state">No active interests found.</p>'
     report_rows = "\n".join(render_report_row(item) for item in reports_payload["reports"]) or '<p class="empty-state">No user-scoped reports found yet.</p>'
     shared_report_rows = "\n".join(render_report_row(item) for item in reports_payload["shared_reports"]) or '<p class="empty-state">No shared daily reports found yet.</p>'
@@ -1329,6 +1570,7 @@ def render_dashboard_html(
     <nav>
       <a href="#overview">Overview</a>
       <a href="#signals">Signals</a>
+      <a href="/matches?user_id={quote(user_id)}">Opportunities</a>
       <a href="#digest">Digest</a>
       <a href="#interests">Interests</a>
       <a href="#reports">Reports</a>
@@ -1435,6 +1677,17 @@ def render_dashboard_html(
       <div class="interest-grid">{interest_cards_html}</div>
     </section>
 
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>Top Opportunities</h2>
+          <p>Highest-priority grouped matches across live and preview inventory.</p>
+        </div>
+        <a href="/matches?user_id={quote(user_id)}">Open full opportunities page</a>
+      </div>
+      <div class="interest-grid">{opportunity_cards_html}</div>
+    </section>
+
     <section class="section" id="reports">
       <div class="section-header">
         <div>
@@ -1482,6 +1735,13 @@ def render_dashboard_html(
             <span class="pill">Reports</span>
             <h3><a href="/api/users/{quote(user_id)}/reports">/api/users/{html.escape(user_id)}/reports</a></h3>
             <p>User-scoped report list plus latest digest/review metadata.</p>
+          </div>
+        </article>
+        <article class="report-row">
+          <div>
+            <span class="pill">Matches</span>
+            <h3><a href="/api/users/{quote(user_id)}/matches">/api/users/{html.escape(user_id)}/matches</a></h3>
+            <p>Active match inventory, grouped opportunity clusters, relationship mix, and top candidates.</p>
           </div>
         </article>
         <article class="report-row">
@@ -1560,6 +1820,206 @@ def render_signals_inbox(
     """
 
 
+def render_matches_html(
+    *,
+    db_path: Path,
+    user_id: str,
+) -> str:
+    payload = load_user_matches_payload(db_path, user_id=user_id)
+    user = payload["user"]
+    summary = payload["summary"]
+    top_matches = payload["top_matches"] if isinstance(payload.get("top_matches"), list) else []
+    groups = payload["opportunity_groups"] if isinstance(payload.get("opportunity_groups"), list) else []
+    match_cards_html = "\n".join(
+        render_match_card(match, user_id=user_id)
+        for match in top_matches
+        if isinstance(match, dict)
+    ) or '<p class="empty-state">No active matches found yet.</p>'
+    group_cards_html = "\n".join(
+        render_opportunity_group_card(group, user_id=user_id)
+        for group in groups
+        if isinstance(group, dict)
+    ) or '<p class="empty-state">No grouped opportunities found yet.</p>'
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Matches & Opportunities</title>
+  <style>
+    :root {{
+      --bg: #f4ede1;
+      --panel: rgba(255, 250, 244, 0.88);
+      --panel-strong: #fff9f0;
+      --border: #decaae;
+      --ink: #1d2128;
+      --muted: #706658;
+      --accent: #8f3911;
+      --accent-soft: #f1e0cb;
+      --accent-deep: #4e2513;
+      --shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(188, 121, 48, 0.18), transparent 22%),
+        radial-gradient(circle at 80% 10%, rgba(124, 86, 43, 0.1), transparent 20%),
+        linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
+    }}
+    main {{ max-width: 1120px; margin: 0 auto; padding: 36px 20px 60px; }}
+    nav {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 18px;
+    }}
+    nav a {{
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(255, 250, 244, 0.78);
+      color: var(--muted);
+      font-size: 0.92rem;
+      text-decoration: none;
+    }}
+    .hero, .section {{
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 24px;
+      margin-bottom: 22px;
+      box-shadow: var(--shadow);
+    }}
+    .hero {{
+      background: linear-gradient(135deg, rgba(255, 247, 236, 0.98), rgba(241, 223, 195, 0.9));
+    }}
+    .hero h1 {{
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2.1rem, 4vw, 3.3rem);
+      letter-spacing: -0.04em;
+      margin: 0 0 10px;
+    }}
+    .hero p, .section p {{
+      color: var(--muted);
+      line-height: 1.6;
+    }}
+    .eyebrow {{
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }}
+    .chip-row, .meta-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }}
+    .chip, .pill {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 7px 11px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.84rem;
+      font-weight: 600;
+      border: 1px solid var(--border);
+    }}
+    .summary-grid, .card-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 14px;
+    }}
+    .summary-card, .match-card, .opportunity-card {{
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }}
+    .summary-card strong {{
+      display: block;
+      font-size: 1.9rem;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--accent-deep);
+      margin-top: 8px;
+    }}
+    .section-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 18px;
+    }}
+    .match-card h3, .opportunity-card h3 {{
+      margin: 0;
+      font-size: 1.08rem;
+      line-height: 1.35;
+    }}
+    .match-card p, .opportunity-card p {{
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }}
+    a {{ color: var(--accent); text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    .empty-state {{ color: var(--muted); margin: 0; }}
+  </style>
+</head>
+<body>
+  <main>
+    <nav>
+      <a href="/?user_id={quote(user_id)}">Dashboard</a>
+      <a href="/matches?user_id={quote(user_id)}">Opportunities</a>
+      <a href="/api/users/{quote(user_id)}/matches">Matches JSON</a>
+      <a href="/api/users/{quote(user_id)}/matching/run">Matching action</a>
+    </nav>
+    <section class="hero">
+      <span class="eyebrow">Matches & Opportunities</span>
+      <h1>{html.escape(str(user["display_name"]))}</h1>
+      <p>Review the active matched inventory for this collector, grouped into opportunity clusters by relationship strength and listing status.</p>
+      <div class="chip-row">
+        <span class="chip">User <strong>{html.escape(str(user["id"]))}</strong></span>
+        <span class="chip">Language <strong>{html.escape(str(user["language"]))}</strong></span>
+        <span class="chip">Timezone <strong>{html.escape(str(user["timezone"]))}</strong></span>
+      </div>
+    </section>
+    <section class="summary-grid">
+      <article class="summary-card"><span class="eyebrow">Active Matches</span><strong>{summary["active_match_count"]}</strong></article>
+      <article class="summary-card"><span class="eyebrow">High Score</span><strong>{summary["high_score_count"]}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Live</span><strong>{summary["live_count"]}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Preview</span><strong>{summary["preview_count"]}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Exact</span><strong>{summary["exact_count"]}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Groups</span><strong>{summary["opportunity_group_count"]}</strong></article>
+    </section>
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>Opportunity Groups</h2>
+          <p>Grouped by interest, relationship type, listing status, and listing title so repeated inventory reads like one opportunity cluster.</p>
+        </div>
+      </div>
+      <div class="card-grid">{group_cards_html}</div>
+    </section>
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>Top Matches</h2>
+          <p>Highest-scoring current candidates across all active interests.</p>
+        </div>
+      </div>
+      <div class="card-grid">{match_cards_html}</div>
+    </section>
+  </main>
+</body>
+</html>"""
+
+
 def render_signal_card(
     signal: dict[str, object],
     *,
@@ -1631,6 +2091,54 @@ def render_signal_interest_group_card(group: dict[str, object]) -> str:
     """
 
 
+def render_match_card(match: dict[str, object], *, user_id: str) -> str:
+    reasons = match.get("match_reasons")
+    reasons_text = ", ".join(str(item) for item in reasons[:4]) if isinstance(reasons, list) and reasons else "no reason tags"
+    note = match.get("opportunity_note")
+    return f"""
+    <article class="match-card">
+      <div class="meta-row">
+        <span class="pill">{html.escape(format_relationship_type_label(str(match.get("relationship_type") or "")))}</span>
+        <span class="pill">{html.escape(format_listing_status_label(str(match.get("listing_status") or "")))}</span>
+        <span class="pill">score {html.escape(str(match.get("match_score") or 0))}</span>
+      </div>
+      <h3>{html.escape(str(match.get("listing_title") or "-"))}</h3>
+      <p>Interest: <strong>{html.escape(str(match.get("interest_name") or "-"))}</strong></p>
+      <p>Target: <strong>{html.escape(str(match.get("target_label") or "-"))}</strong></p>
+      <p>Listing id <strong>{html.escape(str(match.get("source_listing_id") or "-"))}</strong> | last updated {html.escape(str(match.get("listing_updated_at") or "-"))}</p>
+      <p>{html.escape(str(note or reasons_text))}</p>
+      <p><a href="/api/users/{quote(user_id)}/matches">Open matches JSON</a></p>
+    </article>
+    """
+
+
+def render_opportunity_group_card(group: dict[str, object], *, user_id: str) -> str:
+    price_min = group.get("price_min")
+    price_max = group.get("price_max")
+    price_label = "no visible price range"
+    if price_min is not None and price_max is not None:
+        price_label = f"{price_min}–{price_max}"
+    elif price_min is not None:
+        price_label = str(price_min)
+    sample_ids = group.get("sample_source_listing_ids")
+    sample_label = ", ".join(str(item) for item in sample_ids[:3]) if isinstance(sample_ids, list) and sample_ids else "no sample ids"
+    return f"""
+    <article class="opportunity-card">
+      <div class="meta-row">
+        <span class="pill">{html.escape(format_relationship_type_label(str(group.get("relationship_type") or "")))}</span>
+        <span class="pill">{html.escape(format_listing_status_label(str(group.get("listing_status") or "")))}</span>
+        <span class="pill">{html.escape(str(group.get("listing_count") or 0))} listings</span>
+      </div>
+      <h3>{html.escape(str(group.get("interest_name") or "-"))}</h3>
+      <p><strong>{html.escape(str(group.get("listing_title") or "-"))}</strong></p>
+      <p>Target: {html.escape(str(group.get("target_label") or "-"))}</p>
+      <p>Top score {html.escape(str(group.get("top_match_score") or 0))} | price range {html.escape(price_label)}</p>
+      <p>Examples: {html.escape(sample_label)}</p>
+      <p><a href="/api/users/{quote(user_id)}/matches">Open matches JSON</a></p>
+    </article>
+    """
+
+
 def render_interest_card(interest: dict[str, object]) -> str:
     targets = interest.get("targets")
     holdings = interest.get("holdings")
@@ -1679,6 +2187,22 @@ def format_signal_type_label(signal_type: str) -> str:
     if not signal_type:
         return "Signal"
     return signal_type.replace("_", " ").title()
+
+
+def format_relationship_type_label(value: str) -> str:
+    if value == "exact_identity":
+        return "Exact"
+    if value == "variant_related":
+        return "Variant"
+    if value == "series_related":
+        return "Series"
+    return value.replace("_", " ").title() if value else "Match"
+
+
+def format_listing_status_label(value: str) -> str:
+    if not value:
+        return "Unknown"
+    return value.title()
 
 
 def render_report_row(item: dict[str, object]) -> str:
