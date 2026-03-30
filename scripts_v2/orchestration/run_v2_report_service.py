@@ -35,6 +35,7 @@ REPORT_PATTERNS = (
     ("signal_review_index", "Signal Review Index", "Daily index", r"^v2_daily_signal_review_index_(\d{8}T\d{6}\+\d{4})\.md$"),
     ("user_base_review", "User Base Review", "Daily summary", r"^v2_daily_user_base_review_(\d{8}T\d{6}\+\d{4})\.md$"),
 )
+DEFAULT_DASHBOARD_USER_ID = os.getenv("APP_DEFAULT_USER_ID") or "demo_u_v2_curated"
 
 
 def main() -> int:
@@ -64,6 +65,7 @@ def main() -> int:
     parser.add_argument("--loop-sleep-seconds", type=int, default=int(os.getenv("APP_LOOP_SLEEP_SECONDS", "60")))
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "10000")))
+    parser.add_argument("--default-user-id", default=DEFAULT_DASHBOARD_USER_ID)
     args = parser.parse_args()
 
     config = build_service_config(
@@ -100,6 +102,7 @@ def main() -> int:
         reports_dir=Path(config.runtime_paths.output_dir),
         db_path=Path(config.runtime_paths.db_path),
         default_lookback_hours=config.daily_lookback_hours,
+        default_user_id=args.default_user_id,
     )
     server = ThreadingHTTPServer((args.host, args.port), handler_class)
     emit_json(
@@ -130,7 +133,14 @@ def main() -> int:
     return 0
 
 
-def build_handler(*, runtime_root: Path, reports_dir: Path, db_path: Path, default_lookback_hours: int):
+def build_handler(
+    *,
+    runtime_root: Path,
+    reports_dir: Path,
+    db_path: Path,
+    default_lookback_hours: int,
+    default_user_id: str,
+):
     exports_dir = runtime_root / "exports"
 
     class ReportHandler(BaseHTTPRequestHandler):
@@ -151,7 +161,17 @@ def build_handler(*, runtime_root: Path, reports_dir: Path, db_path: Path, defau
                 self._handle_user_api_get(user_id=user_id, action=action, query=parse_qs(parsed.query))
                 return
             if path == "/":
-                self._write_html(HTTPStatus.OK, render_index_html(reports_dir=reports_dir, exports_dir=exports_dir))
+                dashboard_user_id = first_query_value(parse_qs(parsed.query), "user_id") or default_user_id
+                self._write_html(
+                    HTTPStatus.OK,
+                    render_dashboard_html(
+                        db_path=db_path,
+                        reports_dir=reports_dir,
+                        exports_dir=exports_dir,
+                        user_id=dashboard_user_id,
+                        lookback_hours=default_lookback_hours,
+                    ),
+                )
                 return
             if path.startswith("/latest/"):
                 report_kind = unquote(path.removeprefix("/latest/"))
@@ -344,6 +364,14 @@ def parse_bool_param(query: dict[str, list[str]], key: str, *, default: bool) ->
     if value in {"0", "false", "no", "n"}:
         return False
     raise ValueError(f"invalid boolean for {key}")
+
+
+def first_query_value(query: dict[str, list[str]], key: str) -> str | None:
+    values = query.get(key)
+    if not values:
+        return None
+    value = values[0].strip()
+    return value or None
 
 
 def load_user_profile_payload(db_path: Path, *, user_id: str) -> dict[str, object]:
@@ -674,51 +702,51 @@ def safe_child(parent: Path, name: str) -> Path | None:
     return candidate
 
 
-def render_index_html(*, reports_dir: Path, exports_dir: Path) -> str:
+def render_dashboard_html(
+    *,
+    db_path: Path,
+    reports_dir: Path,
+    exports_dir: Path,
+    user_id: str,
+    lookback_hours: int,
+) -> str:
+    profile_payload = load_user_profile_payload(db_path, user_id=user_id)
+    reports_payload = load_user_reports_payload(reports_dir, user_id=user_id)
+    digest_payload = load_latest_digest_payload(
+        db_path=db_path,
+        reports_dir=reports_dir,
+        user_id=user_id,
+        lookback_hours=lookback_hours,
+    )
     reports = report_entries(reports_dir)
     bundles = bundle_entries(exports_dir)
-    latest_kinds = [
-        ("interest_digest_user", "Latest collector digest"),
-        ("signal_review_user", "Latest collector signal review"),
-        ("user_base_review", "Latest daily base review"),
-        ("interest_digest_index", "Latest digest index"),
-        ("signal_review_index", "Latest signal index"),
-    ]
-    latest_cards = []
-    for kind, heading in latest_kinds:
-        item = next((entry for entry in reports if entry["kind"] == kind), None)
-        if item is None:
-            continue
-        latest_cards.append(
-            f"""
-            <a class="latest-card" href="/reports/{quote(str(item["name"]))}">
-              <span class="eyebrow">{html.escape(heading)}</span>
-              <strong>{html.escape(str(item["label"]))}</strong>
-              <span>{html.escape(str(item["scope"]))}</span>
-              <span class="meta">{html.escape(str(item["timestamp_label"]))}</span>
-            </a>
-            """
-        )
-    latest_cards_html = "\n".join(latest_cards) or '<p class="empty-state">No reports generated yet.</p>'
-    report_rows = "\n".join(render_report_row(item) for item in reports) or '<p class="empty-state">No reports found yet.</p>'
+    user = profile_payload["user"]
+    summary = profile_payload["summary"]
+    interests = list(profile_payload["interests"])[:4]
+    latest_cards_html = render_latest_dashboard_cards(reports_payload)
+    interest_cards_html = "\n".join(render_interest_card(interest) for interest in interests) or '<p class="empty-state">No active interests found.</p>'
+    report_rows = "\n".join(render_report_row(item) for item in reports_payload["reports"]) or '<p class="empty-state">No user-scoped reports found yet.</p>'
+    shared_report_rows = "\n".join(render_report_row(item) for item in reports_payload["shared_reports"]) or '<p class="empty-state">No shared daily reports found yet.</p>'
     bundle_rows = "\n".join(render_bundle_row(item) for item in bundles) or '<p class="empty-state">No bundles found yet.</p>'
+    digest_preview = render_digest_preview(str(digest_payload["markdown"]))
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Agent V2 Reports</title>
+  <title>Collector Dashboard</title>
   <style>
     :root {{
-      --bg: #f4efe6;
-      --panel: rgba(255, 250, 243, 0.86);
-      --panel-strong: #fffaf1;
-      --border: #dfcfb5;
-      --ink: #1f2228;
-      --muted: #6d6255;
-      --accent: #8d3a12;
-      --accent-soft: #efe0cf;
-      --shadow: 0 24px 60px rgba(97, 67, 33, 0.08);
+      --bg: #f4ede1;
+      --panel: rgba(255, 250, 244, 0.88);
+      --panel-strong: #fff9f0;
+      --border: #decaae;
+      --ink: #1d2128;
+      --muted: #706658;
+      --accent: #8f3911;
+      --accent-soft: #f1e0cb;
+      --accent-deep: #4e2513;
+      --shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -726,17 +754,31 @@ def render_index_html(*, reports_dir: Path, exports_dir: Path) -> str:
       margin: 0;
       color: var(--ink);
       background:
-        radial-gradient(circle at top left, rgba(181, 118, 52, 0.15), transparent 28%),
-        radial-gradient(circle at top right, rgba(110, 78, 45, 0.1), transparent 26%),
-        linear-gradient(180deg, #f7f1e8 0%, var(--bg) 100%);
+        radial-gradient(circle at top left, rgba(188, 121, 48, 0.18), transparent 22%),
+        radial-gradient(circle at 80% 10%, rgba(124, 86, 43, 0.1), transparent 20%),
+        linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
     }}
     main {{ max-width: 1120px; margin: 0 auto; padding: 36px 20px 60px; }}
     h1, h2, h3 {{ margin: 0 0 12px; }}
-    .hero {{
-      background: linear-gradient(135deg, rgba(255, 248, 237, 0.96), rgba(247, 232, 212, 0.88));
+    nav {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 18px;
+    }}
+    nav a {{
+      padding: 8px 12px;
       border: 1px solid var(--border);
-      border-radius: 28px;
-      padding: 28px;
+      border-radius: 999px;
+      background: rgba(255, 250, 244, 0.78);
+      color: var(--muted);
+      font-size: 0.92rem;
+    }}
+    .hero {{
+      background: linear-gradient(135deg, rgba(255, 247, 236, 0.98), rgba(241, 223, 195, 0.9));
+      border: 1px solid var(--border);
+      border-radius: 30px;
+      padding: 30px;
       box-shadow: var(--shadow);
       margin-bottom: 24px;
     }}
@@ -751,6 +793,28 @@ def render_index_html(*, reports_dir: Path, exports_dir: Path) -> str:
       font-size: 1.08rem;
       line-height: 1.6;
     }}
+    .eyebrow {{
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }}
+    .hero-grid {{
+      display: grid;
+      grid-template-columns: 1.4fr 0.9fr;
+      gap: 18px;
+      align-items: end;
+    }}
+    .hero-side {{
+      background: rgba(255, 250, 244, 0.66);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 18px;
+    }}
+    .hero-side h3 {{
+      font-family: Georgia, "Times New Roman", serif;
+      margin-bottom: 8px;
+    }}
     .chip-row {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }}
     .chip {{
       display: inline-flex;
@@ -762,6 +826,26 @@ def render_index_html(*, reports_dir: Path, exports_dir: Path) -> str:
       border: 1px solid var(--border);
       color: var(--muted);
       font-size: 0.96rem;
+    }}
+    .summary-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 14px;
+      margin: 0 0 24px;
+    }}
+    .summary-card {{
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }}
+    .summary-card strong {{
+      display: block;
+      font-size: 2rem;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--accent-deep);
+      margin-top: 8px;
     }}
     .grid {{
       display: grid;
@@ -835,6 +919,42 @@ def render_index_html(*, reports_dir: Path, exports_dir: Path) -> str:
       gap: 10px;
       justify-content: flex-end;
     }}
+    .digest-card {{
+      background: linear-gradient(180deg, rgba(255, 249, 239, 0.95), rgba(249, 239, 225, 0.92));
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 22px;
+      box-shadow: var(--shadow);
+      display: grid;
+      gap: 14px;
+    }}
+    .digest-card p {{
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.7;
+    }}
+    .digest-meta {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }}
+    .interest-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 14px;
+    }}
+    .interest-card {{
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }}
+    .interest-card p {{
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }}
     .pill {{
       display: inline-flex;
       align-items: center;
@@ -856,6 +976,9 @@ def render_index_html(*, reports_dir: Path, exports_dir: Path) -> str:
     }}
     .empty-state {{ color: var(--muted); margin: 0; }}
     @media (max-width: 720px) {{
+      .hero-grid {{
+        grid-template-columns: 1fr;
+      }}
       .report-row, .bundle-row {{
         grid-template-columns: 1fr;
       }}
@@ -870,34 +993,103 @@ def render_index_html(*, reports_dir: Path, exports_dir: Path) -> str:
 </head>
 <body>
   <main>
-    <section class="hero">
-      <h1>AI Agent V2 Reports</h1>
-      <p>Browse the daily review, signal, and digest reports generated on the Render runtime disk. This page stays attached to the same always-on service that performs incremental sync and scheduled review cycles.</p>
-      <div class="chip-row">
-        <span class="chip">{len(reports)} report files</span>
-        <span class="chip">{len(bundles)} bundles</span>
-        <span class="chip">Health: <a href="/healthz"><code>/healthz</code></a></span>
-        <span class="chip">JSON: <a href="/api/reports"><code>/api/reports</code></a></span>
+    <nav>
+      <a href="#overview">Overview</a>
+      <a href="#digest">Digest</a>
+      <a href="#interests">Interests</a>
+      <a href="#reports">Reports</a>
+      <a href="#api">API</a>
+    </nav>
+    <section class="hero" id="overview">
+      <div class="hero-grid">
+        <div>
+          <span class="eyebrow">Collector Dashboard</span>
+          <h1>{html.escape(str(user["display_name"]))}</h1>
+          <p>Track live collectible opportunities, signals, and daily digest summaries from the same always-on Render service that runs sync, matching, and report generation.</p>
+          <div class="chip-row">
+            <span class="chip">User: <code>{html.escape(str(user["id"]))}</code></span>
+            <span class="chip">Language: <code>{html.escape(str(user["language"]))}</code></span>
+            <span class="chip">Timezone: <code>{html.escape(str(user["timezone"]))}</code></span>
+            <span class="chip">Health: <a href="/healthz"><code>/healthz</code></a></span>
+          </div>
+        </div>
+        <aside class="hero-side">
+          <h3>Latest Digest</h3>
+          <p>{html.escape(str(digest_payload["report"]["timestamp_label"]))}</p>
+          <p><a href="{html.escape(str(digest_payload["report"]["links"]["rendered"]))}">{html.escape(str(digest_payload["report"]["name"]))}</a></p>
+          <p><a href="/api/users/{quote(user_id)}/digest/latest">Open digest API response</a></p>
+        </aside>
       </div>
     </section>
-    <section class="section">
+
+    <section class="summary-grid" aria-label="Summary cards">
+      <article class="summary-card">
+        <span class="eyebrow">Active Interests</span>
+        <strong>{summary["active_interest_count"]}</strong>
+      </article>
+      <article class="summary-card">
+        <span class="eyebrow">Active Matches</span>
+        <strong>{summary["active_match_count"]}</strong>
+      </article>
+      <article class="summary-card">
+        <span class="eyebrow">Active Signals</span>
+        <strong>{summary["active_signal_count"]}</strong>
+      </article>
+      <article class="summary-card">
+        <span class="eyebrow">Tracked Holdings</span>
+        <strong>{summary["active_holding_count"]}</strong>
+      </article>
+    </section>
+
+    <section class="section" id="digest">
       <div class="section-header">
         <div>
-          <h2>Latest Shortcuts</h2>
-          <p>Fast paths into the newest reports by report type.</p>
+          <h2>Latest Digest & Snapshots</h2>
+          <p>Start here if you want the fastest view of what changed recently for this collector.</p>
         </div>
       </div>
-      <div class="grid">{latest_cards_html}</div>
+      <div class="digest-card">
+        <div class="digest-meta">
+          <span class="pill">{html.escape(str(digest_payload["report"]["label"]))}</span>
+          <span class="pill">{html.escape(str(digest_payload["report"]["timestamp_label"]))}</span>
+        </div>
+        <div>{digest_preview}</div>
+        <div class="chip-row">
+          <span class="chip"><a href="{html.escape(str(digest_payload["report"]["links"]["rendered"]))}">Rendered digest</a></span>
+          <span class="chip"><a href="{html.escape(str(digest_payload["report"]["links"]["raw"]))}">Raw markdown</a></span>
+          <span class="chip"><a href="/api/users/{quote(user_id)}/digest/latest">Digest JSON</a></span>
+        </div>
+      </div>
+      <div class="grid" style="margin-top: 18px;">{latest_cards_html}</div>
     </section>
-    <section class="section">
+
+    <section class="section" id="interests">
       <div class="section-header">
         <div>
-          <h2>Reports</h2>
-          <p>Newest markdown reports first, with direct rendered and raw links.</p>
+          <h2>Priority Interests</h2>
+          <p>The most important tracked interests, with signal policy and budget context.</p>
+        </div>
+      </div>
+      <div class="interest-grid">{interest_cards_html}</div>
+    </section>
+
+    <section class="section" id="reports">
+      <div class="section-header">
+        <div>
+          <h2>User Reports</h2>
+          <p>User-scoped report outputs first, then shared daily review artifacts.</p>
         </div>
       </div>
       <div class="report-list">{report_rows}</div>
+      <div class="section-header" style="margin-top: 24px;">
+        <div>
+          <h3>Shared Daily Reports</h3>
+          <p>Global review/index reports that still help explain system state.</p>
+        </div>
+      </div>
+      <div class="report-list">{shared_report_rows}</div>
     </section>
+
     <section class="section">
       <div class="section-header">
         <div>
@@ -907,9 +1099,110 @@ def render_index_html(*, reports_dir: Path, exports_dir: Path) -> str:
       </div>
       <div class="bundle-list">{bundle_rows}</div>
     </section>
+
+    <section class="section" id="api">
+      <div class="section-header">
+        <div>
+          <h2>Frontend API Hooks</h2>
+          <p>These are the live JSON endpoints this dashboard is designed to evolve around.</p>
+        </div>
+      </div>
+      <div class="report-list">
+        <article class="report-row">
+          <div>
+            <span class="pill">Profile</span>
+            <h3><a href="/api/users/{quote(user_id)}/profile">/api/users/{html.escape(user_id)}/profile</a></h3>
+            <p>Interests, targets, holdings, signal policies, and top-level summary counts.</p>
+          </div>
+        </article>
+        <article class="report-row">
+          <div>
+            <span class="pill">Reports</span>
+            <h3><a href="/api/users/{quote(user_id)}/reports">/api/users/{html.escape(user_id)}/reports</a></h3>
+            <p>User-scoped report list plus latest digest/review metadata.</p>
+          </div>
+        </article>
+        <article class="report-row">
+          <div>
+            <span class="pill">Digest</span>
+            <h3><a href="/api/users/{quote(user_id)}/digest/latest">/api/users/{html.escape(user_id)}/digest/latest</a></h3>
+            <p>Latest digest metadata and markdown content for the collector.</p>
+          </div>
+        </article>
+      </div>
+    </section>
   </main>
 </body>
 </html>"""
+
+
+def render_latest_dashboard_cards(reports_payload: dict[str, object]) -> str:
+    latest = reports_payload["latest"]
+    cards: list[str] = []
+    labels = [
+        ("digest", "Latest collector digest"),
+        ("signal_review", "Latest signal review"),
+        ("daily_review", "Latest daily review"),
+    ]
+    for key, heading in labels:
+        item = latest.get(key) if isinstance(latest, dict) else None
+        if not isinstance(item, dict):
+            continue
+        cards.append(
+            f"""
+            <a class="latest-card" href="{html.escape(str(item["links"]["rendered"]))}">
+              <span class="eyebrow">{html.escape(heading)}</span>
+              <strong>{html.escape(str(item["label"]))}</strong>
+              <span>{html.escape(str(item["scope"]))}</span>
+              <span class="meta">{html.escape(str(item["timestamp_label"]))}</span>
+            </a>
+            """
+        )
+    return "\n".join(cards) or '<p class="empty-state">No report shortcuts available yet.</p>'
+
+
+def render_interest_card(interest: dict[str, object]) -> str:
+    targets = interest.get("targets")
+    holdings = interest.get("holdings")
+    policy = interest.get("signal_policy")
+    target = targets[0] if isinstance(targets, list) and targets else {}
+    holding = holdings[0] if isinstance(holdings, list) and holdings else {}
+    policy = policy if isinstance(policy, dict) else {}
+    budget = target.get("budget_max")
+    target_label = target.get("target_label") or interest.get("interest_name") or "-"
+    holding_text = ""
+    if holding:
+        holding_text = (
+            f"<p>Holding: qty <strong>{html.escape(str(holding.get('holding_quantity')))}</strong> "
+            f"at cost <strong>{html.escape(str(holding.get('cost_basis_unit')))}</strong>.</p>"
+        )
+    budget_text = f"Budget max <strong>{html.escape(str(budget))}</strong>" if budget is not None else "No explicit budget cap"
+    return f"""
+    <article class="interest-card">
+      <span class="pill">{html.escape(str(interest["interest_kind"]))}</span>
+      <h3>{html.escape(str(interest["interest_name"]))}</h3>
+      <p>Target: <strong>{html.escape(str(target_label))}</strong></p>
+      <p>Scope / precision: <strong>{html.escape(str(interest["scope_kind"]))}</strong> / <strong>{html.escape(str(interest["precision_mode"]))}</strong></p>
+      <p>{budget_text}</p>
+      <p>Delivery <strong>{html.escape(str(policy.get("delivery_mode") or "-"))}</strong> | cooldown <strong>{html.escape(str(policy.get("cooldown_hours") or "-"))}h</strong></p>
+      {holding_text}
+    </article>
+    """
+
+
+def render_digest_preview(markdown: str) -> str:
+    preview_lines: list[str] = []
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped == "# V2 Interest Daily Digest":
+            continue
+        preview_lines.append(stripped)
+        if len(preview_lines) >= 6:
+            break
+    if not preview_lines:
+        return '<p class="empty-state">No digest summary available yet.</p>'
+    preview_html = "".join(f"<p>{render_inline_markdown(line)}</p>" for line in preview_lines)
+    return preview_html
 
 
 def render_report_row(item: dict[str, object]) -> str:
