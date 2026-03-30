@@ -3139,12 +3139,9 @@ def render_dashboard_html(
         user_id=user_id,
         lookback_hours=lookback_hours,
     )
-    reports = report_entries(reports_dir)
-    bundles = bundle_entries(exports_dir)
     user = profile_payload["user"]
     summary = profile_payload["summary"]
     signal_summary = signals_payload["summary"]
-    interests = list(profile_payload["interests"])[:4]
     latest_cards_html = render_latest_dashboard_cards(reports_payload)
     signals_inbox_html = render_signals_inbox(
         signals_payload,
@@ -3157,11 +3154,11 @@ def render_dashboard_html(
         for group in top_opportunity_groups
         if isinstance(group, dict)
     ) or '<p class="empty-state">No opportunity groups available yet.</p>'
-    interest_cards_html = "\n".join(render_interest_card(interest) for interest in interests) or '<p class="empty-state">No active interests found.</p>'
-    report_rows = "\n".join(render_report_row(item) for item in reports_payload["reports"]) or '<p class="empty-state">No user-scoped reports found yet.</p>'
-    shared_report_rows = "\n".join(render_report_row(item) for item in reports_payload["shared_reports"]) or '<p class="empty-state">No shared daily reports found yet.</p>'
-    bundle_rows = "\n".join(render_bundle_row(item) for item in bundles) or '<p class="empty-state">No bundles found yet.</p>'
     digest_preview = render_digest_preview(str(digest_payload["markdown"]))
+    latest_digest = digest_payload.get("report") if isinstance(digest_payload.get("report"), dict) else {}
+    latest_map = reports_payload.get("latest") if isinstance(reports_payload.get("latest"), dict) else {}
+    latest_signal_review = latest_map.get("signal_review") if isinstance(latest_map.get("signal_review"), dict) else None
+    latest_daily_review = latest_map.get("daily_review") if isinstance(latest_map.get("daily_review"), dict) else None
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -3170,16 +3167,17 @@ def render_dashboard_html(
   <title>Collector Dashboard</title>
   <style>
     :root {{
-      --bg: #f4ede1;
-      --panel: rgba(255, 250, 244, 0.88);
-      --panel-strong: #fff9f0;
-      --border: #decaae;
-      --ink: #1d2128;
-      --muted: #706658;
-      --accent: #8f3911;
-      --accent-soft: #f1e0cb;
-      --accent-deep: #4e2513;
-      --shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
+      --bg: #f8f5ef;
+      --panel: rgba(255, 255, 255, 0.92);
+      --panel-strong: #ffffff;
+      --panel-soft: #fcf8f1;
+      --border: #e8dbc7;
+      --ink: #1f2430;
+      --muted: #686258;
+      --accent: #a34a1e;
+      --accent-soft: #f4e6d5;
+      --accent-deep: #6d2f13;
+      --shadow: 0 18px 44px rgba(81, 60, 31, 0.08);
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -3187,130 +3185,161 @@ def render_dashboard_html(
       margin: 0;
       color: var(--ink);
       background:
-        radial-gradient(circle at top left, rgba(188, 121, 48, 0.18), transparent 22%),
-        radial-gradient(circle at 80% 10%, rgba(124, 86, 43, 0.1), transparent 20%),
-        linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
+        radial-gradient(circle at top left, rgba(194, 141, 74, 0.12), transparent 18%),
+        radial-gradient(circle at 88% 0%, rgba(133, 96, 57, 0.08), transparent 18%),
+        linear-gradient(180deg, #fbf8f3 0%, var(--bg) 100%);
     }}
-    main {{ max-width: 1120px; margin: 0 auto; padding: 36px 20px 60px; }}
-    h1, h2, h3 {{ margin: 0 0 12px; }}
+    main {{ max-width: 1160px; margin: 0 auto; padding: 28px 20px 56px; }}
+    h1, h2, h3 {{ margin: 0 0 10px; }}
     nav {{
       display: flex;
       flex-wrap: wrap;
-      gap: 10px;
-      margin-bottom: 18px;
+      gap: 8px;
+      margin-bottom: 16px;
     }}
     nav a {{
-      padding: 8px 12px;
+      padding: 8px 14px;
       border: 1px solid var(--border);
       border-radius: 999px;
-      background: rgba(255, 250, 244, 0.78);
+      background: rgba(255, 255, 255, 0.78);
       color: var(--muted);
       font-size: 0.92rem;
     }}
     .hero {{
-      background: linear-gradient(135deg, rgba(255, 247, 236, 0.98), rgba(241, 223, 195, 0.9));
+      background: linear-gradient(135deg, rgba(255, 251, 245, 0.98), rgba(246, 236, 219, 0.9));
       border: 1px solid var(--border);
-      border-radius: 30px;
-      padding: 30px;
+      border-radius: 26px;
+      padding: 24px;
       box-shadow: var(--shadow);
-      margin-bottom: 24px;
+      margin-bottom: 18px;
     }}
     .hero h1 {{
       font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2.3rem, 4vw, 3.6rem);
+      font-size: clamp(2.2rem, 4vw, 3.5rem);
       letter-spacing: -0.04em;
     }}
     .hero p {{
       color: var(--muted);
-      max-width: 760px;
-      font-size: 1.08rem;
-      line-height: 1.6;
+      max-width: 660px;
+      font-size: 1.04rem;
+      line-height: 1.55;
+      margin: 0;
     }}
     .eyebrow {{
       text-transform: uppercase;
-      letter-spacing: 0.12em;
+      letter-spacing: 0.14em;
       font-size: 0.78rem;
       color: var(--muted);
     }}
     .hero-grid {{
       display: grid;
-      grid-template-columns: 1.4fr 0.9fr;
+      grid-template-columns: minmax(0, 1.3fr) minmax(260px, 0.8fr);
       gap: 18px;
-      align-items: end;
+      align-items: start;
     }}
     .hero-side {{
-      background: rgba(255, 250, 244, 0.66);
+      background: rgba(255, 255, 255, 0.72);
       border: 1px solid var(--border);
-      border-radius: 22px;
+      border-radius: 20px;
       padding: 18px;
     }}
     .hero-side h3 {{
       font-family: Georgia, "Times New Roman", serif;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
     }}
-    .chip-row {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }}
+    .chip-row {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }}
     .chip {{
       display: inline-flex;
       align-items: center;
       gap: 8px;
       border-radius: 999px;
-      padding: 9px 14px;
-      background: var(--panel-strong);
+      padding: 8px 12px;
+      background: rgba(255, 255, 255, 0.82);
       border: 1px solid var(--border);
       color: var(--muted);
-      font-size: 0.96rem;
+      font-size: 0.94rem;
+    }}
+    .subtle-links {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
     }}
     .summary-grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 14px;
-      margin: 0 0 24px;
+      margin: 0 0 18px;
     }}
     .summary-card {{
       background: var(--panel-strong);
       border: 1px solid var(--border);
-      border-radius: 22px;
+      border-radius: 18px;
       padding: 18px;
       box-shadow: var(--shadow);
     }}
     .summary-card strong {{
       display: block;
-      font-size: 2rem;
+      font-size: 1.9rem;
       font-family: Georgia, "Times New Roman", serif;
       color: var(--accent-deep);
       margin-top: 8px;
+    }}
+    .spotlight-grid {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.95fr);
+      gap: 18px;
+      margin-bottom: 18px;
+    }}
+    .quick-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }}
+    .quick-card {{
+      background: var(--panel-soft);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 16px;
+      display: grid;
+      gap: 8px;
+      box-shadow: var(--shadow);
+    }}
+    .quick-card h3 {{
+      font-size: 1rem;
+      margin-bottom: 0;
+    }}
+    .quick-card p {{
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.45;
+      font-size: 0.96rem;
     }}
     .grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 14px;
-      margin-bottom: 24px;
+      margin-bottom: 0;
     }}
     .latest-card {{
       display: flex;
       flex-direction: column;
       gap: 8px;
-      padding: 18px;
+      padding: 16px;
       background: var(--panel-strong);
       border: 1px solid var(--border);
-      border-radius: 22px;
+      border-radius: 18px;
       box-shadow: var(--shadow);
-      min-height: 148px;
-    }}
-    .eyebrow {{
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      font-size: 0.75rem;
-      color: var(--muted);
+      min-height: 132px;
     }}
     .latest-card strong {{ font-size: 1.1rem; line-height: 1.3; }}
     .latest-card .meta {{ margin-top: auto; color: var(--muted); font-size: 0.92rem; }}
     .section {{
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 28px;
-      padding: 24px;
-      margin-bottom: 22px;
+      border-radius: 22px;
+      padding: 20px;
+      margin-bottom: 18px;
       box-shadow: var(--shadow);
       backdrop-filter: blur(10px);
     }}
@@ -3319,104 +3348,42 @@ def render_dashboard_html(
       justify-content: space-between;
       align-items: baseline;
       gap: 12px;
-      margin-bottom: 18px;
+      margin-bottom: 16px;
     }}
     .section-header p {{ margin: 0; color: var(--muted); }}
-    .report-list, .bundle-list {{
-      display: grid;
-      gap: 12px;
-    }}
-    .report-row, .bundle-row {{
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 14px;
-      align-items: center;
-      background: var(--panel-strong);
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 16px 18px;
-    }}
-    .report-row h3, .bundle-row h3 {{ margin: 0 0 6px; font-size: 1.05rem; }}
-    .report-row p, .bundle-row p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
-    .meta-stack {{
-      display: flex;
-      flex-direction: column;
-      align-items: flex-end;
-      gap: 8px;
-      color: var(--muted);
-      font-size: 0.92rem;
-    }}
-    .meta-stack .link-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      justify-content: flex-end;
-    }}
     .digest-card {{
-      background: linear-gradient(180deg, rgba(255, 249, 239, 0.95), rgba(249, 239, 225, 0.92));
+      background: linear-gradient(180deg, rgba(255, 253, 248, 0.98), rgba(250, 243, 232, 0.92));
       border: 1px solid var(--border);
-      border-radius: 24px;
-      padding: 22px;
+      border-radius: 20px;
+      padding: 20px;
       box-shadow: var(--shadow);
       display: grid;
-      gap: 14px;
+      gap: 12px;
     }}
     .digest-card p {{
       margin: 0;
       color: var(--muted);
-      line-height: 1.7;
+      line-height: 1.65;
     }}
     .digest-meta {{
       display: flex;
       flex-wrap: wrap;
       gap: 10px;
     }}
-    .interest-grid {{
+    .opportunity-grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
       gap: 14px;
     }}
-    .interest-card {{
-      background: var(--panel-strong);
-      border: 1px solid var(--border);
-      border-radius: 22px;
-      padding: 18px;
-      box-shadow: var(--shadow);
-    }}
-    .interest-card p {{
-      margin: 8px 0 0;
-      color: var(--muted);
-      line-height: 1.55;
-    }}
-    .signal-summary-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 12px;
-      margin-bottom: 18px;
-    }}
-    .signal-summary-card {{
-      background: var(--panel-strong);
-      border: 1px solid var(--border);
-      border-radius: 20px;
-      padding: 16px 18px;
-    }}
-    .signal-summary-card strong {{
-      display: block;
-      font-size: 1.6rem;
-      font-family: Georgia, "Times New Roman", serif;
-      color: var(--accent-deep);
-      margin-top: 8px;
-    }}
     .signal-grid {{
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
       gap: 14px;
-      margin-bottom: 18px;
     }}
     .signal-card {{
       background: var(--panel-strong);
       border: 1px solid var(--border);
-      border-radius: 22px;
+      border-radius: 18px;
       padding: 18px;
       box-shadow: var(--shadow);
       display: grid;
@@ -3447,33 +3414,6 @@ def render_dashboard_html(
       gap: 10px;
       margin-top: 4px;
     }}
-    .signal-links a {{
-      font-size: 0.94rem;
-    }}
-    .signal-interest-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 14px;
-    }}
-    .signal-interest-card {{
-      background: rgba(255, 250, 244, 0.72);
-      border: 1px solid var(--border);
-      border-radius: 20px;
-      padding: 18px;
-      display: grid;
-      gap: 8px;
-    }}
-    .signal-interest-card h3 {{
-      margin: 0;
-      font-size: 1.04rem;
-    }}
-    .mini-list {{
-      margin: 0;
-      padding-left: 18px;
-      color: var(--muted);
-      display: grid;
-      gap: 6px;
-    }}
     .pill {{
       display: inline-flex;
       align-items: center;
@@ -3494,18 +3434,32 @@ def render_dashboard_html(
       border-radius: 6px;
     }}
     .empty-state {{ color: var(--muted); margin: 0; }}
+    details.dev-tools {{
+      margin-top: 8px;
+      border-top: 1px solid var(--border);
+      padding-top: 16px;
+    }}
+    details.dev-tools summary {{
+      cursor: pointer;
+      color: var(--muted);
+      font-weight: 600;
+      margin-bottom: 12px;
+    }}
+    .developer-links {{
+      display: grid;
+      gap: 10px;
+      font-size: 0.95rem;
+      color: var(--muted);
+    }}
     @media (max-width: 720px) {{
       .hero-grid {{
         grid-template-columns: 1fr;
       }}
-      .report-row, .bundle-row {{
+      .spotlight-grid {{
         grid-template-columns: 1fr;
       }}
-      .meta-stack {{
-        align-items: flex-start;
-      }}
-      .meta-stack .link-row {{
-        justify-content: flex-start;
+      .quick-grid {{
+        grid-template-columns: 1fr;
       }}
     }}
   </style>
@@ -3514,32 +3468,34 @@ def render_dashboard_html(
   <main>
     <nav>
       <a href="#overview">Overview</a>
-      <a href="/actions?user_id={quote(user_id)}">Actions</a>
       <a href="#signals">Signals</a>
-      <a href="/interests?user_id={quote(user_id)}">Interests</a>
       <a href="/matches?user_id={quote(user_id)}">Opportunities</a>
+      <a href="/interests?user_id={quote(user_id)}">Interests</a>
       <a href="#digest">Digest</a>
       <a href="#reports">Reports</a>
-      <a href="#api">API</a>
+      <a href="/actions?user_id={quote(user_id)}">Actions</a>
     </nav>
     <section class="hero" id="overview">
       <div class="hero-grid">
         <div>
           <span class="eyebrow">Collector Dashboard</span>
           <h1>{html.escape(str(user["display_name"]))}</h1>
-          <p>Track live collectible opportunities, signals, and daily digest summaries from the same always-on Render service that runs sync, matching, and report generation.</p>
+          <p>A lighter command center for the collector: start with what matters now, then dive into signals, opportunities, interests, or operator actions only when you need them.</p>
           <div class="chip-row">
-            <span class="chip">User: <code>{html.escape(str(user["id"]))}</code></span>
-            <span class="chip">Language: <code>{html.escape(str(user["language"]))}</code></span>
-            <span class="chip">Timezone: <code>{html.escape(str(user["timezone"]))}</code></span>
-            <span class="chip">Health: <a href="/healthz"><code>/healthz</code></a></span>
+            <span class="chip">User <code>{html.escape(str(user["id"]))}</code></span>
+            <span class="chip">{html.escape(str(user["language"]))}</span>
+            <span class="chip">{html.escape(str(user["timezone"]))}</span>
           </div>
         </div>
         <aside class="hero-side">
-          <h3>Latest Digest</h3>
-          <p>{html.escape(str(digest_payload["report"]["timestamp_label"]))}</p>
-          <p><a href="{html.escape(str(digest_payload["report"]["links"]["rendered"]))}">{html.escape(str(digest_payload["report"]["name"]))}</a></p>
-          <p><a href="/api/users/{quote(user_id)}/digest/latest">Open digest API response</a></p>
+          <span class="eyebrow">Latest Digest</span>
+          <h3>{html.escape(str(latest_digest.get("timestamp_label") or "-"))}</h3>
+          <p><a href="{html.escape(str(latest_digest.get("links", {}).get("rendered") if isinstance(latest_digest.get("links"), dict) else '#'))}">{html.escape(str(latest_digest.get("name") or "Open latest digest"))}</a></p>
+          <div class="subtle-links">
+            <a href="{html.escape(str(latest_digest.get("links", {}).get("rendered") if isinstance(latest_digest.get("links"), dict) else '#'))}">Open digest</a>
+            <a href="/actions?user_id={quote(user_id)}">Run actions</a>
+            <a href="/matches?user_id={quote(user_id)}">Browse opportunities</a>
+          </div>
         </aside>
       </div>
     </section>
@@ -3563,156 +3519,107 @@ def render_dashboard_html(
       </article>
     </section>
 
+    <section class="spotlight-grid">
+      <section class="section" id="digest">
+        <div class="section-header">
+          <div>
+            <h2>Latest Digest</h2>
+            <p>The quickest editorial read on what changed recently for this collector.</p>
+          </div>
+        </div>
+        <div class="digest-card">
+          <div class="digest-meta">
+            <span class="pill">{html.escape(str(latest_digest.get("label") or "Digest"))}</span>
+            <span class="pill">{html.escape(str(latest_digest.get("timestamp_label") or "-"))}</span>
+          </div>
+          <div>{digest_preview}</div>
+          <div class="subtle-links">
+            <a href="{html.escape(str(latest_digest.get("links", {}).get("rendered") if isinstance(latest_digest.get("links"), dict) else '#'))}">Rendered digest</a>
+            <a href="{html.escape(str(latest_digest.get("links", {}).get("raw") if isinstance(latest_digest.get("links"), dict) else '#'))}">Raw markdown</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-header">
+          <div>
+            <h2>Jump Back In</h2>
+            <p>Go straight to the next workflow instead of scanning every surface on one page.</p>
+          </div>
+        </div>
+        <div class="quick-grid">
+          <a class="quick-card" href="#signals">
+            <span class="eyebrow">Signals</span>
+            <h3>{html.escape(str(summary["active_signal_count"]))} active alerts</h3>
+            <p>{html.escape(str(signal_summary["high_count"]))} high urgency and {html.escape(str(signal_summary["recent_signal_count"]))} fresh in the last {lookback_hours} hours.</p>
+          </a>
+          <a class="quick-card" href="/matches?user_id={quote(user_id)}">
+            <span class="eyebrow">Opportunities</span>
+            <h3>{html.escape(str(len(top_opportunity_groups)))} top groups</h3>
+            <p>Open the full opportunities page for grouped live and preview matches.</p>
+          </a>
+          <a class="quick-card" href="/interests?user_id={quote(user_id)}">
+            <span class="eyebrow">Interests</span>
+            <h3>{html.escape(str(summary["active_interest_count"]))} active interests</h3>
+            <p>Manage targets, budgets, holdings, and signal policy without leaving the browser.</p>
+          </a>
+          <a class="quick-card" href="/actions?user_id={quote(user_id)}">
+            <span class="eyebrow">Operator Actions</span>
+            <h3>Run matching or signals</h3>
+            <p>Trigger matching, signal generation, or digest refresh when you need an immediate update.</p>
+          </a>
+        </div>
+      </section>
+    </section>
+
     <section class="section" id="signals">
       <div class="section-header">
         <div>
-          <h2>Signals Inbox</h2>
-          <p>The most actionable active alerts, grouped from the live V2 signal engine rather than from report markdown.</p>
+          <h2>Signals To Review</h2>
+          <p>Only the top active alerts are shown here so the page stays scannable.</p>
         </div>
-      </div>
-      <div class="signal-summary-grid">
-        <article class="signal-summary-card">
-          <span class="eyebrow">High urgency</span>
-          <strong>{signal_summary["high_count"]}</strong>
-        </article>
-        <article class="signal-summary-card">
-          <span class="eyebrow">Fresh in {lookback_hours}h</span>
-          <strong>{signal_summary["recent_signal_count"]}</strong>
-        </article>
-        <article class="signal-summary-card">
-          <span class="eyebrow">Event-driven</span>
-          <strong>{signal_summary["event_signal_count"]}</strong>
-        </article>
-        <article class="signal-summary-card">
-          <span class="eyebrow">Standing</span>
-          <strong>{signal_summary["standing_signal_count"]}</strong>
-        </article>
+        <div class="subtle-links">
+          <a href="/actions?user_id={quote(user_id)}">Run signal refresh</a>
+          {f'<a href="{html.escape(str(latest_signal_review.get("links", {}).get("rendered")))}">Latest signal review</a>' if isinstance(latest_signal_review, dict) and isinstance(latest_signal_review.get("links"), dict) and latest_signal_review.get("links", {}).get("rendered") else ""}
+        </div>
       </div>
       {signals_inbox_html}
-    </section>
-
-    <section class="section" id="digest">
-      <div class="section-header">
-        <div>
-          <h2>Latest Digest & Snapshots</h2>
-          <p>Start here if you want the fastest view of what changed recently for this collector.</p>
-        </div>
-      </div>
-      <div class="digest-card">
-        <div class="digest-meta">
-          <span class="pill">{html.escape(str(digest_payload["report"]["label"]))}</span>
-          <span class="pill">{html.escape(str(digest_payload["report"]["timestamp_label"]))}</span>
-        </div>
-        <div>{digest_preview}</div>
-        <div class="chip-row">
-          <span class="chip"><a href="{html.escape(str(digest_payload["report"]["links"]["rendered"]))}">Rendered digest</a></span>
-          <span class="chip"><a href="{html.escape(str(digest_payload["report"]["links"]["raw"]))}">Raw markdown</a></span>
-          <span class="chip"><a href="/api/users/{quote(user_id)}/digest/latest">Digest JSON</a></span>
-        </div>
-      </div>
-      <div class="grid" style="margin-top: 18px;">{latest_cards_html}</div>
-    </section>
-
-    <section class="section" id="interests">
-      <div class="section-header">
-        <div>
-          <h2>Priority Interests</h2>
-          <p>The most important tracked interests, with signal policy and budget context.</p>
-        </div>
-        <a href="/interests?user_id={quote(user_id)}">Open full interests page</a>
-      </div>
-      <div class="interest-grid">{interest_cards_html}</div>
     </section>
 
     <section class="section">
       <div class="section-header">
         <div>
-          <h2>Top Opportunities</h2>
-          <p>Highest-priority grouped matches across live and preview inventory.</p>
+          <h2>Top Opportunity Groups</h2>
+          <p>Keep the homepage focused on the best clusters, then open the dedicated page for the long tail.</p>
         </div>
-        <a href="/matches?user_id={quote(user_id)}">Open full opportunities page</a>
+        <div class="subtle-links">
+          <a href="/matches?user_id={quote(user_id)}">View all opportunities</a>
+        </div>
       </div>
-      <div class="interest-grid">{opportunity_cards_html}</div>
+      <div class="opportunity-grid">{opportunity_cards_html}</div>
     </section>
 
     <section class="section" id="reports">
       <div class="section-header">
         <div>
-          <h2>User Reports</h2>
-          <p>User-scoped report outputs first, then shared daily review artifacts.</p>
+          <h2>Recent Report Shortcuts</h2>
+          <p>Keep the archive off the homepage and jump straight into the latest digest, signal review, or daily review.</p>
+        </div>
+        <div class="subtle-links">
+          {f'<a href="{html.escape(str(latest_daily_review.get("links", {}).get("rendered")))}">Latest daily review</a>' if isinstance(latest_daily_review, dict) and isinstance(latest_daily_review.get("links"), dict) and latest_daily_review.get("links", {}).get("rendered") else ""}
         </div>
       </div>
-      <div class="report-list">{report_rows}</div>
-      <div class="section-header" style="margin-top: 24px;">
-        <div>
-          <h3>Shared Daily Reports</h3>
-          <p>Global review/index reports that still help explain system state.</p>
-        </div>
-      </div>
-      <div class="report-list">{shared_report_rows}</div>
+      <div class="grid">{latest_cards_html}</div>
     </section>
 
     <section class="section">
-      <div class="section-header">
-        <div>
-          <h2>Bundles</h2>
-          <p>Zip exports you can download directly when you package reports on the server.</p>
+      <details class="dev-tools">
+        <summary>Developer and operator links</summary>
+        <div class="developer-links">
+          <div><a href="/healthz">Health check</a> · <a href="/api/users/{quote(user_id)}/profile">Profile API</a> · <a href="/api/users/{quote(user_id)}/signals">Signals API</a></div>
+          <div><a href="/api/users/{quote(user_id)}/matches">Matches API</a> · <a href="/api/users/{quote(user_id)}/interests">Interests API</a> · <a href="/api/users/{quote(user_id)}/digest/latest">Digest API</a></div>
         </div>
-      </div>
-      <div class="bundle-list">{bundle_rows}</div>
-    </section>
-
-    <section class="section" id="api">
-      <div class="section-header">
-        <div>
-          <h2>Frontend API Hooks</h2>
-          <p>These are the live JSON endpoints this dashboard is designed to evolve around.</p>
-        </div>
-      </div>
-      <div class="report-list">
-        <article class="report-row">
-          <div>
-            <span class="pill">Profile</span>
-            <h3><a href="/api/users/{quote(user_id)}/profile">/api/users/{html.escape(user_id)}/profile</a></h3>
-            <p>Interests, targets, holdings, signal policies, and top-level summary counts.</p>
-          </div>
-        </article>
-        <article class="report-row">
-          <div>
-            <span class="pill">Interests</span>
-            <h3><a href="/api/users/{quote(user_id)}/interests">/api/users/{html.escape(user_id)}/interests</a></h3>
-            <p>Frontend-ready interest inventory with per-interest counts, target labels, holdings, and policy summaries.</p>
-          </div>
-        </article>
-        <article class="report-row">
-          <div>
-            <span class="pill">Reports</span>
-            <h3><a href="/api/users/{quote(user_id)}/reports">/api/users/{html.escape(user_id)}/reports</a></h3>
-            <p>User-scoped report list plus latest digest/review metadata.</p>
-          </div>
-        </article>
-        <article class="report-row">
-          <div>
-            <span class="pill">Matches</span>
-            <h3><a href="/api/users/{quote(user_id)}/matches">/api/users/{html.escape(user_id)}/matches</a></h3>
-            <p>Active match inventory, grouped opportunity clusters, relationship mix, and top candidates.</p>
-          </div>
-        </article>
-        <article class="report-row">
-          <div>
-            <span class="pill">Signals</span>
-            <h3><a href="/api/users/{quote(user_id)}/signals">/api/users/{html.escape(user_id)}/signals</a></h3>
-            <p>Active signal inbox payload with urgency counts, grouped interest coverage, and top alerts.</p>
-          </div>
-        </article>
-        <article class="report-row">
-          <div>
-            <span class="pill">Digest</span>
-            <h3><a href="/api/users/{quote(user_id)}/digest/latest">/api/users/{html.escape(user_id)}/digest/latest</a></h3>
-            <p>Latest digest metadata and markdown content for the collector.</p>
-          </div>
-        </article>
-      </div>
+      </details>
     </section>
   </main>
 </body>
@@ -3751,27 +3658,12 @@ def render_signals_inbox(
     signal_review_metadata: object,
 ) -> str:
     top_signals = signals_payload.get("top_signals")
-    interest_groups = signals_payload.get("interest_groups")
     signal_cards = "\n".join(
         render_signal_card(signal, user_id=user_id, signal_review_metadata=signal_review_metadata)
-        for signal in (top_signals if isinstance(top_signals, list) else [])
+        for signal in ((top_signals[:3]) if isinstance(top_signals, list) else [])
         if isinstance(signal, dict)
     ) or '<p class="empty-state">No active signals available yet.</p>'
-    group_cards = "\n".join(
-        render_signal_interest_group_card(group)
-        for group in (interest_groups[:4] if isinstance(interest_groups, list) else [])
-        if isinstance(group, dict)
-    ) or '<p class="empty-state">No signal coverage groups available yet.</p>'
-    return f"""
-    <div class="signal-grid">{signal_cards}</div>
-    <div class="section-header" style="margin-top: 4px;">
-      <div>
-        <h3>Signal Coverage By Interest</h3>
-        <p>Which interests currently hold the most active signal pressure.</p>
-      </div>
-    </div>
-    <div class="signal-interest-grid">{group_cards}</div>
-    """
+    return f'<div class="signal-grid">{signal_cards}</div>'
 
 
 def render_interests_html(
@@ -4464,8 +4356,25 @@ def render_interest_detail_card(interest: dict[str, object], *, user_id: str) ->
 
 
 def render_digest_preview(markdown: str) -> str:
+    lines = markdown.splitlines()
+    highlight_lines: list[str] = []
+    inside_highlights = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "## Highlights":
+            inside_highlights = True
+            continue
+        if inside_highlights and stripped.startswith("## "):
+            break
+        if inside_highlights and stripped.startswith("- "):
+            highlight_lines.append(stripped)
+            if len(highlight_lines) >= 4:
+                break
+    if highlight_lines:
+        return "".join(f"<p>{render_inline_markdown(line)}</p>" for line in highlight_lines)
+
     preview_lines: list[str] = []
-    for line in markdown.splitlines():
+    for line in lines:
         stripped = line.strip()
         if not stripped or stripped == "# V2 Interest Daily Digest":
             continue
