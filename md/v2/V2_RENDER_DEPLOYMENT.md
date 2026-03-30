@@ -28,7 +28,7 @@ This is the current "off the laptop" deployment path. It is not yet the future P
 - runtime root:
   `/opt/render/project/src/runtime`
 - database:
-  `/opt/render/project/src/runtime/data/agent_v2_import.db`
+  `/opt/render/project/src/runtime/data/agent_v2.db`
 - reports:
   `/opt/render/project/src/runtime/reports_v2`
 - state files:
@@ -65,7 +65,7 @@ The current tested path is:
 1. open Render Shell
 2. move aside the existing cloud DB if needed
 3. transfer the local DB with Magic Wormhole
-4. rename the uploaded file into place
+4. keep the uploaded file as `agent_v2.db`
 5. point `ZHAO_V2_DATABASE_PATH` at that uploaded DB
 6. redeploy the worker
 
@@ -84,12 +84,6 @@ Receive the uploaded file:
 wormhole receive <code-from-local-machine>
 ```
 
-Rename the uploaded DB:
-
-```bash
-mv agent_v2.db agent_v2_import.db
-```
-
 ## Required Environment Variables
 
 Current important Render env vars:
@@ -106,7 +100,7 @@ Current important Render env vars:
 
 Current checked-in database path in `render.yaml`:
 
-- `/opt/render/project/src/runtime/data/agent_v2_import.db`
+- `/opt/render/project/src/runtime/data/agent_v2.db`
 
 If the DB filename changes later, update both:
 
@@ -142,10 +136,30 @@ Run the three report cycles:
 
 ```bash
 cd /opt/render/project/src
-python scripts_v2/orchestration/run_v2_daily_user_base_review_cycle.py --db-path /opt/render/project/src/runtime/data/agent_v2_import.db --output-dir /opt/render/project/src/runtime/reports_v2 --state-dir /opt/render/project/src/runtime/data/state
-python scripts_v2/orchestration/run_v2_daily_signal_review_cycle.py --db-path /opt/render/project/src/runtime/data/agent_v2_import.db --output-dir /opt/render/project/src/runtime/reports_v2 --state-dir /opt/render/project/src/runtime/data/state
-python scripts_v2/orchestration/run_v2_daily_interest_digest_cycle.py --db-path /opt/render/project/src/runtime/data/agent_v2_import.db --output-dir /opt/render/project/src/runtime/reports_v2 --state-dir /opt/render/project/src/runtime/data/state
+python scripts_v2/orchestration/run_v2_daily_user_base_review_cycle.py --db-path /opt/render/project/src/runtime/data/agent_v2.db --output-dir /opt/render/project/src/runtime/reports_v2 --state-dir /opt/render/project/src/runtime/data/state
+python scripts_v2/orchestration/run_v2_daily_signal_review_cycle.py --db-path /opt/render/project/src/runtime/data/agent_v2.db --output-dir /opt/render/project/src/runtime/reports_v2 --state-dir /opt/render/project/src/runtime/data/state
+python scripts_v2/orchestration/run_v2_daily_interest_digest_cycle.py --db-path /opt/render/project/src/runtime/data/agent_v2.db --output-dir /opt/render/project/src/runtime/reports_v2 --state-dir /opt/render/project/src/runtime/data/state
 ```
+
+## Packaging Reports For Download
+
+The simplest current way to retrieve reports from Render is:
+
+1. package the latest report markdown files into one zip
+2. transfer that zip off the Render shell
+
+Create a zip bundle:
+
+```bash
+cd /opt/render/project/src
+python scripts_v2/reporting/package_v2_reports.py --reports-dir /opt/render/project/src/runtime/reports_v2 --output-dir /opt/render/project/src/runtime/exports --limit 20
+```
+
+That creates a zip like:
+
+- `/opt/render/project/src/runtime/exports/v2_reports_bundle_<timestamp>.zip`
+
+You can then transfer that single zip file with the same Magic Wormhole workflow used for the database.
 
 ## Current Known Limitations
 
@@ -158,6 +172,6 @@ python scripts_v2/orchestration/run_v2_daily_interest_digest_cycle.py --db-path 
 When ready, the next cleanup milestone is:
 
 1. merge this deployment setup into `main`
-2. decide whether to keep `agent_v2_import.db` as the stable runtime name or rename it back to `agent_v2.db`
-3. add a simple way to retrieve reports
+2. keep the runtime DB at the normal name `agent_v2.db`
+3. use the report packaging helper when you want to retrieve report files
 4. later migrate to Postgres when the codebase is ready

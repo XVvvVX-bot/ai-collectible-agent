@@ -13,7 +13,7 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.10
       - key: ZHAO_V2_DATABASE_PATH
-        value: /opt/render/project/src/runtime/data/agent_v2_import.db
+        value: /opt/render/project/src/runtime/data/agent_v2.db
       - key: ZHAO_V2_BASE_URL
         value: http://zhaoonline.hk:8888
       - key: ZHAO_V2_SECRET
