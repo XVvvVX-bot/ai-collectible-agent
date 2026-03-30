@@ -25,6 +25,7 @@ if str(SRC_DIR) not in sys.path:
 from ai_agent_v2.ingestion.live_incremental import DEFAULT_STATE_SOURCE_KEY
 from ai_agent_v2.matching.v2_matcher import run_v2_matching
 from ai_agent_v2.reporting.interest_digest import build_interest_digest_report
+from ai_agent_v2.reporting.signal_review import EVENT_SIGNAL_TYPES
 from ai_agent_v2.runtime_host import BackgroundServiceRunner, DEFAULT_BASE_URL, build_service_config, emit_json
 from ai_agent_v2.signals.interest_signals import run_interest_signal_generation
 
@@ -116,6 +117,7 @@ def main() -> int:
             "/api/reports",
             "/api/users/<user_id>/profile",
             "/api/users/<user_id>/reports",
+            "/api/users/<user_id>/signals",
             "/api/users/<user_id>/digest/latest",
             "/api/users/<user_id>/matching/run",
             "/api/users/<user_id>/signals/run",
@@ -229,6 +231,11 @@ def build_handler(
                     return
                 if action == "reports":
                     payload = load_user_reports_payload(reports_dir, user_id=user_id)
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+                if action == "signals":
+                    lookback_hours = parse_int_param(query, "lookback_hours", default=default_lookback_hours)
+                    payload = load_user_signals_payload(db_path, user_id=user_id, lookback_hours=lookback_hours)
                     self._write_json(HTTPStatus.OK, payload)
                     return
                 if action == "digest/latest":
@@ -532,6 +539,152 @@ def load_user_reports_payload(reports_dir: Path, *, user_id: str) -> dict[str, o
     }
 
 
+def load_user_signals_payload(
+    db_path: Path,
+    *,
+    user_id: str,
+    lookback_hours: int,
+) -> dict[str, object]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        user_row = conn.execute(
+            """
+            SELECT id, display_name, language, timezone
+            FROM users
+            WHERE id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        if user_row is None:
+            raise ValueError(f"user not found: {user_id}")
+
+        signal_rows = conn.execute(
+            """
+            SELECT
+              s.id,
+              s.interest_id,
+              s.target_id,
+              s.listing_id,
+              s.signal_type,
+              s.urgency,
+              s.reason_code,
+              s.signal_title,
+              s.signal_summary,
+              s.group_key,
+              s.payload_json,
+              s.created_at,
+              s.last_seen_at,
+              s.status,
+              i.interest_name,
+              i.interest_kind,
+              i.interest_priority,
+              t.target_label,
+              t.budget_max,
+              n.source_listing_id,
+              n.title AS listing_title,
+              n.status_norm AS listing_status,
+              COALESCE(n.price_end, n.price_initial) AS listing_price,
+              n.price_end,
+              n.updated_at AS listing_updated_at
+            FROM signals_v2 s
+            JOIN user_interests_v2 i ON i.id = s.interest_id
+            LEFT JOIN user_interest_targets_v2 t ON t.id = s.target_id
+            LEFT JOIN market_listings_norm_v2 n ON n.id = s.listing_id
+            WHERE s.user_id = ? AND s.status = 'active'
+            ORDER BY
+              CASE s.urgency WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+              s.last_seen_at DESC,
+              i.interest_name,
+              s.signal_type
+            """,
+            (user_id,),
+        ).fetchall()
+
+    recent_cutoff = datetime.utcnow().timestamp() - (lookback_hours * 3600)
+    signals: list[dict[str, object]] = []
+    urgency_counts = {"high": 0, "medium": 0, "low": 0}
+    event_signal_count = 0
+    recent_signal_count = 0
+    groups_by_interest: dict[str, dict[str, object]] = {}
+
+    for row in signal_rows:
+        signal = normalize_sqlite_row(row)
+        payload = parse_json_blob(signal.pop("payload_json", None))
+        urgency = str(signal.get("urgency") or "low")
+        urgency_counts[urgency] = urgency_counts.get(urgency, 0) + 1
+        signal_type = str(signal.get("signal_type") or "")
+        signal_family = "event" if signal_type in EVENT_SIGNAL_TYPES else "standing"
+        if signal_family == "event":
+            event_signal_count += 1
+        last_seen_at = str(signal.get("last_seen_at") or "")
+        if iso_to_unix(last_seen_at) >= recent_cutoff:
+            recent_signal_count += 1
+
+        listing_price = signal.get("listing_price")
+        signal["payload"] = payload
+        signal["signal_family"] = signal_family
+        signal["pricing_note"] = build_signal_pricing_note(signal=signal, payload=payload)
+        signal["context_note"] = build_signal_context_note(signal=signal, payload=payload)
+        signal["listing"] = {
+            "source_listing_id": signal.get("source_listing_id"),
+            "title": signal.get("listing_title"),
+            "status": signal.get("listing_status"),
+            "price": listing_price,
+            "updated_at": signal.get("listing_updated_at"),
+        }
+        signals.append(signal)
+
+        interest_key = str(signal.get("interest_id"))
+        group = groups_by_interest.setdefault(
+            interest_key,
+            {
+                "interest_id": signal.get("interest_id"),
+                "interest_name": signal.get("interest_name"),
+                "interest_kind": signal.get("interest_kind"),
+                "interest_priority": signal.get("interest_priority"),
+                "signal_count": 0,
+                "high_count": 0,
+                "signals": [],
+            },
+        )
+        group["signal_count"] = int(group["signal_count"]) + 1
+        if urgency == "high":
+            group["high_count"] = int(group["high_count"]) + 1
+        cast_signals = group["signals"]
+        if isinstance(cast_signals, list) and len(cast_signals) < 3:
+            cast_signals.append(signal)
+
+    interest_groups = sorted(
+        groups_by_interest.values(),
+        key=lambda item: (
+            -int(item["high_count"]),
+            -int(item["signal_count"]),
+            str(item["interest_name"]),
+        ),
+    )
+    top_signals = signals[:8]
+
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "user": normalize_sqlite_row(user_row),
+        "lookback_hours": lookback_hours,
+        "summary": {
+            "active_signal_count": len(signals),
+            "event_signal_count": event_signal_count,
+            "standing_signal_count": len(signals) - event_signal_count,
+            "recent_signal_count": recent_signal_count,
+            "high_count": urgency_counts.get("high", 0),
+            "medium_count": urgency_counts.get("medium", 0),
+            "low_count": urgency_counts.get("low", 0),
+            "interest_count": len(interest_groups),
+        },
+        "signals": signals,
+        "top_signals": top_signals,
+        "interest_groups": interest_groups,
+    }
+
+
 def load_latest_digest_payload(
     *,
     db_path: Path,
@@ -640,6 +793,89 @@ def decode_json_fields(payload: dict[str, object]) -> dict[str, object]:
     return decoded
 
 
+def parse_json_blob(value: object) -> dict[str, object]:
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def iso_to_unix(value: str) -> float:
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def build_signal_pricing_note(*, signal: dict[str, object], payload: dict[str, object]) -> str | None:
+    budget_max = payload.get("budget_max")
+    expected_end_mid = payload.get("expected_end_mid")
+    cost_basis_unit = payload.get("cost_basis_unit")
+    listing_price = signal.get("listing_price")
+    fragments: list[str] = []
+    if listing_price is not None:
+        fragments.append(f"listing price {listing_price}")
+    if budget_max is not None:
+        fragments.append(f"budget max {budget_max}")
+    if expected_end_mid is not None:
+        fragments.append(f"ended trend {expected_end_mid}")
+    if cost_basis_unit is not None:
+        fragments.append(f"cost basis {cost_basis_unit}")
+    if not fragments:
+        return None
+    return " | ".join(fragments)
+
+
+def build_signal_context_note(*, signal: dict[str, object], payload: dict[str, object]) -> str | None:
+    listing_title = signal.get("listing_title")
+    listing_status = signal.get("listing_status")
+    if listing_title:
+        if listing_status:
+            return f"{listing_status} listing: {listing_title}"
+        return f"listing: {listing_title}"
+
+    event = payload.get("event")
+    if isinstance(event, dict):
+        title = event.get("title")
+        new_status = event.get("new_status_raw")
+        if title and new_status:
+            return f"event listing: {title} -> status {new_status}"
+        if title:
+            return f"event listing: {title}"
+
+    group = payload.get("group")
+    if isinstance(group, dict):
+        title = group.get("title")
+        listing_count = group.get("listing_count")
+        status_norm = group.get("status_norm")
+        relationship_type = group.get("relationship_type")
+        fragments = []
+        if title:
+            fragments.append(str(title))
+        if listing_count is not None:
+            fragments.append(f"{listing_count} listings")
+        if status_norm:
+            fragments.append(str(status_norm))
+        if relationship_type:
+            fragments.append(str(relationship_type))
+        if fragments:
+            return " | ".join(fragments)
+
+    top_group = payload.get("top_group")
+    if isinstance(top_group, dict):
+        title = top_group.get("title")
+        listing_count = top_group.get("listing_count")
+        if title and listing_count is not None:
+            return f"top discovery group: {title} ({listing_count} listings)"
+
+    return None
+
+
 def classify_report(name: str) -> dict[str, str]:
     for kind, label, scope, pattern in REPORT_PATTERNS:
         match = re.match(pattern, name)
@@ -712,6 +948,11 @@ def render_dashboard_html(
 ) -> str:
     profile_payload = load_user_profile_payload(db_path, user_id=user_id)
     reports_payload = load_user_reports_payload(reports_dir, user_id=user_id)
+    signals_payload = load_user_signals_payload(
+        db_path,
+        user_id=user_id,
+        lookback_hours=lookback_hours,
+    )
     digest_payload = load_latest_digest_payload(
         db_path=db_path,
         reports_dir=reports_dir,
@@ -722,8 +963,14 @@ def render_dashboard_html(
     bundles = bundle_entries(exports_dir)
     user = profile_payload["user"]
     summary = profile_payload["summary"]
+    signal_summary = signals_payload["summary"]
     interests = list(profile_payload["interests"])[:4]
     latest_cards_html = render_latest_dashboard_cards(reports_payload)
+    signals_inbox_html = render_signals_inbox(
+        signals_payload,
+        user_id=user_id,
+        signal_review_metadata=(reports_payload.get("latest") or {}).get("signal_review") if isinstance(reports_payload.get("latest"), dict) else None,
+    )
     interest_cards_html = "\n".join(render_interest_card(interest) for interest in interests) or '<p class="empty-state">No active interests found.</p>'
     report_rows = "\n".join(render_report_row(item) for item in reports_payload["reports"]) or '<p class="empty-state">No user-scoped reports found yet.</p>'
     shared_report_rows = "\n".join(render_report_row(item) for item in reports_payload["shared_reports"]) or '<p class="empty-state">No shared daily reports found yet.</p>'
@@ -955,6 +1202,92 @@ def render_dashboard_html(
       color: var(--muted);
       line-height: 1.55;
     }}
+    .signal-summary-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }}
+    .signal-summary-card {{
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 16px 18px;
+    }}
+    .signal-summary-card strong {{
+      display: block;
+      font-size: 1.6rem;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--accent-deep);
+      margin-top: 8px;
+    }}
+    .signal-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+      margin-bottom: 18px;
+    }}
+    .signal-card {{
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+      display: grid;
+      gap: 10px;
+    }}
+    .signal-card h3 {{
+      margin: 0;
+      font-size: 1.08rem;
+      line-height: 1.35;
+    }}
+    .signal-card p {{
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }}
+    .signal-meta {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }}
+    .signal-note {{
+      font-size: 0.94rem;
+      color: var(--muted);
+    }}
+    .signal-links {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 4px;
+    }}
+    .signal-links a {{
+      font-size: 0.94rem;
+    }}
+    .signal-interest-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 14px;
+    }}
+    .signal-interest-card {{
+      background: rgba(255, 250, 244, 0.72);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 18px;
+      display: grid;
+      gap: 8px;
+    }}
+    .signal-interest-card h3 {{
+      margin: 0;
+      font-size: 1.04rem;
+    }}
+    .mini-list {{
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      display: grid;
+      gap: 6px;
+    }}
     .pill {{
       display: inline-flex;
       align-items: center;
@@ -995,6 +1328,7 @@ def render_dashboard_html(
   <main>
     <nav>
       <a href="#overview">Overview</a>
+      <a href="#signals">Signals</a>
       <a href="#digest">Digest</a>
       <a href="#interests">Interests</a>
       <a href="#reports">Reports</a>
@@ -1039,6 +1373,34 @@ def render_dashboard_html(
         <span class="eyebrow">Tracked Holdings</span>
         <strong>{summary["active_holding_count"]}</strong>
       </article>
+    </section>
+
+    <section class="section" id="signals">
+      <div class="section-header">
+        <div>
+          <h2>Signals Inbox</h2>
+          <p>The most actionable active alerts, grouped from the live V2 signal engine rather than from report markdown.</p>
+        </div>
+      </div>
+      <div class="signal-summary-grid">
+        <article class="signal-summary-card">
+          <span class="eyebrow">High urgency</span>
+          <strong>{signal_summary["high_count"]}</strong>
+        </article>
+        <article class="signal-summary-card">
+          <span class="eyebrow">Fresh in {lookback_hours}h</span>
+          <strong>{signal_summary["recent_signal_count"]}</strong>
+        </article>
+        <article class="signal-summary-card">
+          <span class="eyebrow">Event-driven</span>
+          <strong>{signal_summary["event_signal_count"]}</strong>
+        </article>
+        <article class="signal-summary-card">
+          <span class="eyebrow">Standing</span>
+          <strong>{signal_summary["standing_signal_count"]}</strong>
+        </article>
+      </div>
+      {signals_inbox_html}
     </section>
 
     <section class="section" id="digest">
@@ -1124,6 +1486,13 @@ def render_dashboard_html(
         </article>
         <article class="report-row">
           <div>
+            <span class="pill">Signals</span>
+            <h3><a href="/api/users/{quote(user_id)}/signals">/api/users/{html.escape(user_id)}/signals</a></h3>
+            <p>Active signal inbox payload with urgency counts, grouped interest coverage, and top alerts.</p>
+          </div>
+        </article>
+        <article class="report-row">
+          <div>
             <span class="pill">Digest</span>
             <h3><a href="/api/users/{quote(user_id)}/digest/latest">/api/users/{html.escape(user_id)}/digest/latest</a></h3>
             <p>Latest digest metadata and markdown content for the collector.</p>
@@ -1159,6 +1528,107 @@ def render_latest_dashboard_cards(reports_payload: dict[str, object]) -> str:
             """
         )
     return "\n".join(cards) or '<p class="empty-state">No report shortcuts available yet.</p>'
+
+
+def render_signals_inbox(
+    signals_payload: dict[str, object],
+    *,
+    user_id: str,
+    signal_review_metadata: object,
+) -> str:
+    top_signals = signals_payload.get("top_signals")
+    interest_groups = signals_payload.get("interest_groups")
+    signal_cards = "\n".join(
+        render_signal_card(signal, user_id=user_id, signal_review_metadata=signal_review_metadata)
+        for signal in (top_signals if isinstance(top_signals, list) else [])
+        if isinstance(signal, dict)
+    ) or '<p class="empty-state">No active signals available yet.</p>'
+    group_cards = "\n".join(
+        render_signal_interest_group_card(group)
+        for group in (interest_groups[:4] if isinstance(interest_groups, list) else [])
+        if isinstance(group, dict)
+    ) or '<p class="empty-state">No signal coverage groups available yet.</p>'
+    return f"""
+    <div class="signal-grid">{signal_cards}</div>
+    <div class="section-header" style="margin-top: 4px;">
+      <div>
+        <h3>Signal Coverage By Interest</h3>
+        <p>Which interests currently hold the most active signal pressure.</p>
+      </div>
+    </div>
+    <div class="signal-interest-grid">{group_cards}</div>
+    """
+
+
+def render_signal_card(
+    signal: dict[str, object],
+    *,
+    user_id: str,
+    signal_review_metadata: object,
+) -> str:
+    urgency = str(signal.get("urgency") or "low")
+    family = str(signal.get("signal_family") or "standing")
+    interest_name = str(signal.get("interest_name") or "-")
+    context_note = signal.get("context_note")
+    pricing_note = signal.get("pricing_note")
+    listing = signal.get("listing")
+    latest_review_link = None
+    if isinstance(signal_review_metadata, dict):
+        links = signal_review_metadata.get("links")
+        if isinstance(links, dict):
+            latest_review_link = links.get("rendered")
+    listing_html = ""
+    if isinstance(listing, dict) and listing.get("source_listing_id"):
+        listing_html = f'<span class="pill">Listing {html.escape(str(listing.get("source_listing_id")))}</span>'
+    note_bits = []
+    if context_note:
+        note_bits.append(f'<p class="signal-note">{html.escape(str(context_note))}</p>')
+    if pricing_note:
+        note_bits.append(f'<p class="signal-note">{html.escape(str(pricing_note))}</p>')
+    links = [f'<a href="/api/users/{quote(user_id)}/signals">Signals JSON</a>']
+    if latest_review_link:
+        links.append(f'<a href="{html.escape(str(latest_review_link))}">Latest signal review</a>')
+    return f"""
+    <article class="signal-card">
+      <div class="signal-meta">
+        <span class="pill">{html.escape(urgency.title())}</span>
+        <span class="pill">{html.escape(family.title())}</span>
+        <span class="pill">{html.escape(format_signal_type_label(str(signal.get("signal_type") or "")))}</span>
+        {listing_html}
+      </div>
+      <h3>{html.escape(str(signal.get("signal_title") or "-"))}</h3>
+      <p>{html.escape(str(signal.get("signal_summary") or ""))}</p>
+      {''.join(note_bits)}
+      <p class="signal-note">Interest: <strong>{html.escape(interest_name)}</strong> | last seen {html.escape(str(signal.get("last_seen_at") or "-"))}</p>
+      <div class="signal-links">{''.join(links)}</div>
+    </article>
+    """
+
+
+def render_signal_interest_group_card(group: dict[str, object]) -> str:
+    signals = group.get("signals")
+    items = []
+    if isinstance(signals, list):
+        for signal in signals[:3]:
+            if not isinstance(signal, dict):
+                continue
+            items.append(
+                f"<li><strong>{html.escape(str(signal.get('signal_title') or '-'))}</strong> "
+                f"<span class=\"signal-note\">{html.escape(str(signal.get('urgency') or '-'))} | "
+                f"{html.escape(format_signal_type_label(str(signal.get('signal_type') or '')))}</span></li>"
+            )
+    items_html = "".join(items) or "<li>No active signals.</li>"
+    return f"""
+    <article class="signal-interest-card">
+      <div class="signal-meta">
+        <span class="pill">{html.escape(str(group.get("interest_kind") or "-"))}</span>
+        <span class="pill">{html.escape(str(group.get("signal_count") or 0))} active</span>
+        <span class="pill">{html.escape(str(group.get("high_count") or 0))} high</span>
+      </div>
+      <h3>{html.escape(str(group.get("interest_name") or "-"))}</h3>
+      <ul class="mini-list">{items_html}</ul>
+    </article>
+    """
 
 
 def render_interest_card(interest: dict[str, object]) -> str:
@@ -1203,6 +1673,12 @@ def render_digest_preview(markdown: str) -> str:
         return '<p class="empty-state">No digest summary available yet.</p>'
     preview_html = "".join(f"<p>{render_inline_markdown(line)}</p>" for line in preview_lines)
     return preview_html
+
+
+def format_signal_type_label(signal_type: str) -> str:
+    if not signal_type:
+        return "Signal"
+    return signal_type.replace("_", " ").title()
 
 
 def render_report_row(item: dict[str, object]) -> str:
