@@ -116,6 +116,8 @@ def main() -> int:
             "/actions",
             "/actions/run",
             "/interests",
+            "/interests/edit",
+            "/interests/save",
             "/matches",
             "/healthz",
             "/api/reports",
@@ -174,6 +176,25 @@ def build_handler(
                         lookback_hours=default_lookback_hours,
                     ),
                 )
+                return
+            if path == "/interests/edit":
+                query = parse_qs(parsed.query)
+                interests_user_id = first_query_value(query, "user_id") or default_user_id
+                interest_id = first_query_value(query, "interest_id")
+                if not interest_id:
+                    self._write_html(HTTPStatus.BAD_REQUEST, render_error_html("interest_id is required"))
+                    return
+                try:
+                    self._write_html(
+                        HTTPStatus.OK,
+                        render_interest_edit_html(
+                            db_path=db_path,
+                            user_id=interests_user_id,
+                            interest_id=interest_id,
+                        ),
+                    )
+                except ValueError as exc:
+                    self._write_html(HTTPStatus.NOT_FOUND, render_error_html(str(exc)))
                 return
             user_route = match_user_api_route(path)
             if user_route is not None:
@@ -251,6 +272,40 @@ def build_handler(
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
+            if parsed.path == "/interests/save":
+                form = parse_qs(self.rfile.read(int(self.headers.get("Content-Length", "0") or "0")).decode("utf-8"))
+                user_id = first_query_value(form, "user_id") or default_user_id
+                interest_id = first_query_value(form, "interest_id")
+                if not interest_id:
+                    self._write_html(HTTPStatus.BAD_REQUEST, render_error_html("interest_id is required"))
+                    return
+                try:
+                    payload = save_interest_form(
+                        db_path=db_path,
+                        user_id=user_id,
+                        interest_id=interest_id,
+                        interest_priority=first_query_value(form, "interest_priority") or "normal",
+                        interest_notes=first_query_value(form, "interest_notes") or "",
+                        budget_max=parse_optional_float_param(form, "budget_max"),
+                        condition_mode=first_query_value(form, "condition_mode") or "ignore",
+                        delivery_mode=first_query_value(form, "delivery_mode") or "daily_digest",
+                        cooldown_hours=parse_int_param(form, "cooldown_hours", default=24),
+                        min_match_score=parse_optional_float_param(form, "min_match_score"),
+                        max_signals_per_day=parse_int_param(form, "max_signals_per_day", default=5),
+                    )
+                    self._write_html(
+                        HTTPStatus.OK,
+                        render_interest_save_result_html(
+                            payload=payload,
+                            user_id=user_id,
+                            interest_id=interest_id,
+                        ),
+                    )
+                except ValueError as exc:
+                    self._write_html(HTTPStatus.BAD_REQUEST, render_error_html(str(exc)))
+                except Exception as exc:  # pragma: no cover - defensive form fallback
+                    self._write_html(HTTPStatus.INTERNAL_SERVER_ERROR, render_error_html(str(exc)))
+                return
             if parsed.path == "/actions/run":
                 form = parse_qs(self.rfile.read(int(self.headers.get("Content-Length", "0") or "0")).decode("utf-8"))
                 user_id = first_query_value(form, "user_id") or default_user_id
@@ -426,6 +481,16 @@ def parse_int_param(query: dict[str, list[str]], key: str, *, default: int) -> i
         return int(values[0])
     except ValueError as exc:
         raise ValueError(f"invalid integer for {key}") from exc
+
+
+def parse_optional_float_param(query: dict[str, list[str]], key: str) -> float | None:
+    values = query.get(key)
+    if not values or not values[0].strip():
+        return None
+    try:
+        return float(values[0])
+    except ValueError as exc:
+        raise ValueError(f"invalid float for {key}") from exc
 
 
 def parse_bool_param(query: dict[str, list[str]], key: str, *, default: bool) -> bool:
@@ -688,6 +753,140 @@ def load_user_interests_payload(db_path: Path, *, user_id: str) -> dict[str, obj
         },
         "interest_kind_counts": interest_kind_counts,
         "interests": enriched_interests,
+    }
+
+
+def load_interest_editor_payload(db_path: Path, *, user_id: str, interest_id: str) -> dict[str, object]:
+    payload = load_user_interests_payload(db_path, user_id=user_id)
+    interests = payload["interests"] if isinstance(payload.get("interests"), list) else []
+    interest = next(
+        (
+            item
+            for item in interests
+            if isinstance(item, dict) and str(item.get("id") or "") == interest_id
+        ),
+        None,
+    )
+    if interest is None:
+        raise ValueError(f"interest not found: {interest_id}")
+    return {
+        "ok": True,
+        "user": payload["user"],
+        "interest": interest,
+    }
+
+
+def save_interest_form(
+    *,
+    db_path: Path,
+    user_id: str,
+    interest_id: str,
+    interest_priority: str,
+    interest_notes: str,
+    budget_max: float | None,
+    condition_mode: str,
+    delivery_mode: str,
+    cooldown_hours: int,
+    min_match_score: float | None,
+    max_signals_per_day: int,
+) -> dict[str, object]:
+    valid_priorities = {"high", "normal", "low"}
+    valid_condition_modes = {"ignore", "prefer", "require"}
+    valid_delivery_modes = {"immediate", "daily_digest"}
+    if interest_priority not in valid_priorities:
+        raise ValueError("invalid interest_priority")
+    if condition_mode not in valid_condition_modes:
+        raise ValueError("invalid condition_mode")
+    if delivery_mode not in valid_delivery_modes:
+        raise ValueError("invalid delivery_mode")
+
+    now_iso = datetime.utcnow().replace(microsecond=0).isoformat() + "+00:00"
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        interest_row = conn.execute(
+            """
+            SELECT id
+            FROM user_interests_v2
+            WHERE id = ? AND user_id = ?
+            """,
+            (interest_id, user_id),
+        ).fetchone()
+        if interest_row is None:
+            raise ValueError(f"interest not found: {interest_id}")
+
+        target_row = conn.execute(
+            """
+            SELECT id
+            FROM user_interest_targets_v2
+            WHERE interest_id = ? AND is_active = 1
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (interest_id,),
+        ).fetchone()
+        if target_row is None:
+            raise ValueError("no editable active target found for interest")
+
+        policy_row = conn.execute(
+            """
+            SELECT id
+            FROM user_interest_signal_policies_v2
+            WHERE interest_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (interest_id,),
+        ).fetchone()
+        if policy_row is None:
+            raise ValueError("no editable signal policy found for interest")
+
+        conn.execute(
+            """
+            UPDATE user_interests_v2
+            SET interest_priority = ?,
+                notes = ?,
+                updated_at = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (interest_priority, interest_notes.strip(), now_iso, interest_id, user_id),
+        )
+        conn.execute(
+            """
+            UPDATE user_interest_targets_v2
+            SET budget_max = ?,
+                condition_mode = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (budget_max, condition_mode, now_iso, str(target_row["id"])),
+        )
+        conn.execute(
+            """
+            UPDATE user_interest_signal_policies_v2
+            SET delivery_mode = ?,
+                cooldown_hours = ?,
+                min_match_score = ?,
+                max_signals_per_day = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                delivery_mode,
+                cooldown_hours,
+                min_match_score,
+                max_signals_per_day,
+                now_iso,
+                str(policy_row["id"]),
+            ),
+        )
+        conn.commit()
+
+    updated = load_interest_editor_payload(db_path, user_id=user_id, interest_id=interest_id)
+    return {
+        "ok": True,
+        "updated_at": now_iso,
+        "user": updated["user"],
+        "interest": updated["interest"],
     }
 
 
@@ -1780,6 +1979,257 @@ def render_action_result_html(
     <section class="panel">
       <h2>Action Payload</h2>
       <pre>{pretty_payload}</pre>
+    </section>
+  </main>
+</body>
+</html>"""
+
+
+def render_interest_edit_html(
+    *,
+    db_path: Path,
+    user_id: str,
+    interest_id: str,
+) -> str:
+    payload = load_interest_editor_payload(db_path, user_id=user_id, interest_id=interest_id)
+    user = payload["user"]
+    interest = payload["interest"]
+    targets = interest.get("targets") if isinstance(interest.get("targets"), list) else []
+    holdings = interest.get("holdings") if isinstance(interest.get("holdings"), list) else []
+    policy = interest.get("signal_policy") if isinstance(interest.get("signal_policy"), dict) else {}
+    primary_target = next((target for target in targets if isinstance(target, dict)), {})
+    primary_holding = next((holding for holding in holdings if isinstance(holding, dict)), {})
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Edit Interest</title>
+  <style>
+    :root {{
+      --bg: #f4ede1;
+      --panel: rgba(255, 250, 244, 0.88);
+      --panel-strong: #fff9f0;
+      --border: #decaae;
+      --ink: #1d2128;
+      --muted: #706658;
+      --accent: #8f3911;
+      --accent-deep: #4e2513;
+      --shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
+      margin: 0;
+      color: var(--ink);
+      background: linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
+    }}
+    main {{ max-width: 900px; margin: 0 auto; padding: 36px 20px 60px; }}
+    .panel {{
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 24px;
+      box-shadow: var(--shadow);
+      margin-bottom: 20px;
+    }}
+    h1 {{
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2rem, 4vw, 3rem);
+      letter-spacing: -0.04em;
+      margin: 0 0 10px;
+    }}
+    p {{ color: var(--muted); line-height: 1.6; }}
+    .chip-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }}
+    .chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 7px 11px;
+      background: #f1e0cb;
+      color: var(--accent);
+      font-size: 0.84rem;
+      font-weight: 600;
+      border: 1px solid var(--border);
+    }}
+    form {{
+      display: grid;
+      gap: 16px;
+    }}
+    .grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+    }}
+    label {{
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 0.94rem;
+    }}
+    input, select, textarea, button {{
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 10px 12px;
+      font: inherit;
+      background: #fffdf8;
+      color: var(--ink);
+    }}
+    textarea {{
+      min-height: 120px;
+      resize: vertical;
+    }}
+    button {{
+      background: var(--accent);
+      color: #fff9f0;
+      font-weight: 700;
+      cursor: pointer;
+    }}
+    button:hover {{
+      background: var(--accent-deep);
+    }}
+    code {{
+      font-family: "JetBrains Mono", "Cascadia Code", monospace;
+      background: #efe4d4;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }}
+    a {{ color: var(--accent); text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="panel">
+      <h1>{html.escape(str(interest.get("interest_name") or "-"))}</h1>
+      <p>Edit the main operational knobs for this interest without leaving the browser.</p>
+      <div class="chip-row">
+        <span class="chip">User <code>{html.escape(str(user.get("id") or user_id))}</code></span>
+        <span class="chip">Target <code>{html.escape(str(primary_target.get("target_label") or "-"))}</code></span>
+        <span class="chip">Holding <code>{html.escape(str(primary_holding.get("raw_input") or primary_holding.get("normalized_name") or "none"))}</code></span>
+      </div>
+    </section>
+    <section class="panel">
+      <form method="post" action="/interests/save">
+        <input type="hidden" name="user_id" value="{html.escape(user_id)}">
+        <input type="hidden" name="interest_id" value="{html.escape(interest_id)}">
+        <div class="grid">
+          <label>Priority
+            <select name="interest_priority">
+              {render_select_option('high', str(interest.get('interest_priority') or ''), 'High')}
+              {render_select_option('normal', str(interest.get('interest_priority') or ''), 'Normal')}
+              {render_select_option('low', str(interest.get('interest_priority') or ''), 'Low')}
+            </select>
+          </label>
+          <label>Budget max
+            <input type="number" step="0.01" name="budget_max" value="{html.escape(str(primary_target.get('budget_max') or ''))}">
+          </label>
+          <label>Condition mode
+            <select name="condition_mode">
+              {render_select_option('ignore', str(primary_target.get('condition_mode') or ''), 'Ignore')}
+              {render_select_option('prefer', str(primary_target.get('condition_mode') or ''), 'Prefer')}
+              {render_select_option('require', str(primary_target.get('condition_mode') or ''), 'Require')}
+            </select>
+          </label>
+          <label>Delivery mode
+            <select name="delivery_mode">
+              {render_select_option('immediate', str(policy.get('delivery_mode') or ''), 'Immediate')}
+              {render_select_option('daily_digest', str(policy.get('delivery_mode') or ''), 'Daily digest')}
+            </select>
+          </label>
+          <label>Cooldown hours
+            <input type="number" min="1" max="168" name="cooldown_hours" value="{html.escape(str(policy.get('cooldown_hours') or 24))}">
+          </label>
+          <label>Min match score
+            <input type="number" step="0.1" name="min_match_score" value="{html.escape(str(policy.get('min_match_score') or ''))}">
+          </label>
+          <label>Max signals per day
+            <input type="number" min="1" max="100" name="max_signals_per_day" value="{html.escape(str(policy.get('max_signals_per_day') or 5))}">
+          </label>
+        </div>
+        <label>Operator notes
+          <textarea name="interest_notes">{html.escape(str(interest.get("notes") or ""))}</textarea>
+        </label>
+        <button type="submit">Save interest settings</button>
+      </form>
+      <p><a href="/interests?user_id={quote(user_id)}">Back to interests</a></p>
+    </section>
+  </main>
+</body>
+</html>"""
+
+
+def render_interest_save_result_html(
+    *,
+    payload: dict[str, object],
+    user_id: str,
+    interest_id: str,
+) -> str:
+    interest = payload.get("interest") if isinstance(payload.get("interest"), dict) else {}
+    summary = interest.get("summary") if isinstance(interest.get("summary"), dict) else {}
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Interest Saved</title>
+  <style>
+    body {{
+      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
+      margin: 0;
+      color: #1d2128;
+      background: linear-gradient(180deg, #f8f2ea 0%, #f4ede1 100%);
+    }}
+    main {{ max-width: 900px; margin: 0 auto; padding: 36px 20px 60px; }}
+    .panel {{
+      background: rgba(255, 250, 244, 0.88);
+      border: 1px solid #decaae;
+      border-radius: 28px;
+      padding: 24px;
+      box-shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
+      margin-bottom: 20px;
+    }}
+    h1 {{
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2rem, 4vw, 3rem);
+      letter-spacing: -0.04em;
+      margin: 0 0 10px;
+    }}
+    p {{ color: #706658; line-height: 1.6; }}
+    .link-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 16px;
+    }}
+    a {{ color: #8f3911; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    code {{
+      font-family: "JetBrains Mono", "Cascadia Code", monospace;
+      background: #efe4d4;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="panel">
+      <h1>Interest Saved</h1>
+      <p><code>{html.escape(str(interest.get("interest_name") or interest_id))}</code> was updated successfully.</p>
+      <p>Signals <strong>{html.escape(str(summary.get("active_signal_count") or 0))}</strong> | matches <strong>{html.escape(str(summary.get("active_match_count") or 0))}</strong> | updated at <code>{html.escape(str(payload.get("updated_at") or "-"))}</code></p>
+      <div class="link-row">
+        <a href="/interests/edit?user_id={quote(user_id)}&interest_id={quote(interest_id)}">Keep editing</a>
+        <a href="/interests?user_id={quote(user_id)}">Back to interests</a>
+        <a href="/?user_id={quote(user_id)}">Back to dashboard</a>
+      </div>
     </section>
   </main>
 </body>
@@ -3102,6 +3552,7 @@ def render_interest_detail_card(interest: dict[str, object], *, user_id: str) ->
         </section>
       </div>
       <div class="detail-row">
+        <a href="/interests/edit?user_id={quote(user_id)}&interest_id={quote(str(interest.get('id') or ''))}">Edit settings</a>
         <a href="/api/users/{quote(user_id)}/interests">Interests JSON</a>
         <a href="/api/users/{quote(user_id)}/signals">Signals JSON</a>
         <a href="/api/users/{quote(user_id)}/matches">Matches JSON</a>
@@ -3146,6 +3597,11 @@ def format_listing_status_label(value: str) -> str:
     if not value:
         return "Unknown"
     return value.title()
+
+
+def render_select_option(value: str, current: str, label: str) -> str:
+    selected = ' selected' if value == current else ''
+    return f'<option value="{html.escape(value)}"{selected}>{html.escape(label)}</option>'
 
 
 def render_action_report_row(item: object, *, empty_label: str) -> str:
