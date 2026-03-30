@@ -1,10 +1,11 @@
 services:
-  - type: worker
+  - type: web
     name: ai-agent-v2-worker
     env: python
     plan: starter
     buildCommand: pip install .
-    startCommand: python scripts_v2/orchestration/run_v2_background_worker.py --runtime-root /opt/render/project/src/runtime --timezone Asia/Shanghai
+    startCommand: python scripts_v2/orchestration/run_v2_report_service.py --runtime-root /opt/render/project/src/runtime --timezone Asia/Shanghai
+    healthCheckPath: /healthz
     disk:
       name: ai-agent-v2-runtime
       mountPath: /opt/render/project/src/runtime

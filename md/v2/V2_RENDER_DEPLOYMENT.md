@@ -4,7 +4,7 @@
 
 This document captures the current simplest cloud deployment for V2:
 
-- one Render background worker
+- one Render web service
 - one Render persistent disk
 - one SQLite database file on that disk
 
@@ -12,16 +12,17 @@ This is the current "off the laptop" deployment path. It is not yet the future P
 
 ## What This Deployment Does
 
-- runs the long-lived worker in `scripts_v2/orchestration/run_v2_background_worker.py`
+- runs the long-lived report web service in `scripts_v2/orchestration/run_v2_report_service.py`
 - keeps runtime files under `/opt/render/project/src/runtime`
 - stores the current V2 SQLite database on the attached Render disk
-- runs live incremental sync checks on a loop
-- runs daily review/report cycles on a loop
+- serves a report index and report pages over HTTP
+- keeps the live incremental and daily review/report loops running in a background thread
 
 ## Current Render Files
 
 - root blueprint: `render.yaml`
 - worker entrypoint: `scripts_v2/orchestration/run_v2_background_worker.py`
+- web/report entrypoint: `scripts_v2/orchestration/run_v2_report_service.py`
 
 ## Current Runtime Paths On Render
 
@@ -52,9 +53,10 @@ This is already isolated from the developer laptop because both the worker and t
 
 1. push the branch containing `render.yaml`
 2. create a Render Blueprint from the GitHub repo
-3. let Render create the worker and disk
+3. let Render create the web service and disk
 4. set `ZHAO_V2_SECRET`
-5. confirm the worker starts successfully in logs
+5. confirm the service starts successfully in logs
+6. open the Render service URL to browse reports
 
 ## Importing The Current Local Database
 
@@ -112,8 +114,22 @@ If the DB filename changes later, update both:
 Healthy startup logs include:
 
 - `worker_started`
+- `report_service_started`
 - `incremental_cycle`
 - `daily_cycles`
+
+## Report Browser Routes
+
+The Render service now serves reports directly from the runtime disk.
+
+Main routes:
+
+- `/`
+- `/healthz`
+- `/api/reports`
+- `/reports/<filename>`
+- `/raw/<filename>`
+- `/downloads/<bundle-name>`
 
 Healthy behavior examples:
 
