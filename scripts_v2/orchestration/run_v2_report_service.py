@@ -8,13 +8,14 @@ import html
 import json
 import os
 import re
+import sqlite3
 import sys
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Thread
-from urllib.parse import quote, unquote
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SRC_DIR = ROOT_DIR / "src"
@@ -22,7 +23,10 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from ai_agent_v2.ingestion.live_incremental import DEFAULT_STATE_SOURCE_KEY
+from ai_agent_v2.matching.v2_matcher import run_v2_matching
+from ai_agent_v2.reporting.interest_digest import build_interest_digest_report
 from ai_agent_v2.runtime_host import BackgroundServiceRunner, DEFAULT_BASE_URL, build_service_config, emit_json
+from ai_agent_v2.signals.interest_signals import run_interest_signal_generation
 
 REPORT_PATTERNS = (
     ("interest_digest_user", "Interest Digest", "Collector digest", r"^v2_interest_digest_(.+)_(\d{8}T\d{6}\+\d{4})\.md$"),
@@ -91,14 +95,32 @@ def main() -> int:
     worker_thread = Thread(target=runner.run_forever, kwargs={"stop_event": stop_event}, daemon=True)
     worker_thread.start()
 
-    handler_class = build_handler(runtime_root=Path(config.runtime_paths.runtime_root), reports_dir=Path(config.runtime_paths.output_dir))
+    handler_class = build_handler(
+        runtime_root=Path(config.runtime_paths.runtime_root),
+        reports_dir=Path(config.runtime_paths.output_dir),
+        db_path=Path(config.runtime_paths.db_path),
+        default_lookback_hours=config.daily_lookback_hours,
+    )
     server = ThreadingHTTPServer((args.host, args.port), handler_class)
     emit_json(
         "report_service_started",
         host=args.host,
         port=args.port,
         runtime=runner.start_event()["runtime"],
-        routes=["/", "/healthz", "/api/reports", "/latest/<kind>", "/reports/<name>", "/raw/<name>", "/downloads/<name>"],
+        routes=[
+            "/",
+            "/healthz",
+            "/api/reports",
+            "/api/users/<user_id>/profile",
+            "/api/users/<user_id>/reports",
+            "/api/users/<user_id>/digest/latest",
+            "/api/users/<user_id>/matching/run",
+            "/api/users/<user_id>/signals/run",
+            "/latest/<kind>",
+            "/reports/<name>",
+            "/raw/<name>",
+            "/downloads/<name>",
+        ],
     )
     try:
         server.serve_forever()
@@ -108,19 +130,25 @@ def main() -> int:
     return 0
 
 
-def build_handler(*, runtime_root: Path, reports_dir: Path):
+def build_handler(*, runtime_root: Path, reports_dir: Path, db_path: Path, default_lookback_hours: int):
     exports_dir = runtime_root / "exports"
 
     class ReportHandler(BaseHTTPRequestHandler):
         server_version = "AIAgentReportServer/1.0"
 
         def do_GET(self) -> None:
-            path = self.path.split("?", 1)[0]
+            parsed = urlparse(self.path)
+            path = parsed.path
             if path == "/healthz":
                 self._write_json(HTTPStatus.OK, {"ok": True, "reports_dir": str(reports_dir), "exports_dir": str(exports_dir)})
                 return
             if path == "/api/reports":
                 self._write_json(HTTPStatus.OK, {"reports": report_entries(reports_dir), "bundles": bundle_entries(exports_dir)})
+                return
+            user_route = match_user_api_route(path)
+            if user_route is not None:
+                user_id, action = user_route
+                self._handle_user_api_get(user_id=user_id, action=action, query=parse_qs(parsed.query))
                 return
             if path == "/":
                 self._write_html(HTTPStatus.OK, render_index_html(reports_dir=reports_dir, exports_dir=exports_dir))
@@ -161,8 +189,67 @@ def build_handler(*, runtime_root: Path, reports_dir: Path):
                 return
             self._write_html(HTTPStatus.NOT_FOUND, render_error_html("Route not found"))
 
+        def do_POST(self) -> None:
+            parsed = urlparse(self.path)
+            user_route = match_user_api_route(parsed.path)
+            if user_route is None:
+                self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Route not found"})
+                return
+            user_id, action = user_route
+            self._handle_user_api_post(user_id=user_id, action=action, query=parse_qs(parsed.query))
+
         def log_message(self, format: str, *args) -> None:  # noqa: A003
             return
+
+        def _handle_user_api_get(self, *, user_id: str, action: str, query: dict[str, list[str]]) -> None:
+            try:
+                if action == "profile":
+                    payload = load_user_profile_payload(db_path, user_id=user_id)
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+                if action == "reports":
+                    payload = load_user_reports_payload(reports_dir, user_id=user_id)
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+                if action == "digest/latest":
+                    lookback_hours = parse_int_param(query, "lookback_hours", default=default_lookback_hours)
+                    payload = load_latest_digest_payload(
+                        db_path=db_path,
+                        reports_dir=reports_dir,
+                        user_id=user_id,
+                        lookback_hours=lookback_hours,
+                    )
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+                self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Route not found"})
+            except ValueError as exc:
+                self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": str(exc)})
+            except Exception as exc:  # pragma: no cover - defensive API fallback
+                self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
+
+        def _handle_user_api_post(self, *, user_id: str, action: str, query: dict[str, list[str]]) -> None:
+            try:
+                if action == "matching/run":
+                    payload = run_matching_payload(
+                        db_path=db_path,
+                        user_id=user_id,
+                        only_active_listings=parse_bool_param(query, "only_active", default=True),
+                    )
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+                if action == "signals/run":
+                    payload = run_signals_payload(
+                        db_path=db_path,
+                        user_id=user_id,
+                        lookback_hours=parse_int_param(query, "lookback_hours", default=default_lookback_hours),
+                    )
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+                self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Route not found"})
+            except ValueError as exc:
+                self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": str(exc)})
+            except Exception as exc:  # pragma: no cover - defensive API fallback
+                self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
 
         def _write_json(self, status: HTTPStatus, payload: dict[str, object]) -> None:
             body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
@@ -228,6 +315,301 @@ def bundle_entries(exports_dir: Path) -> list[dict[str, object]]:
             }
         )
     return entries
+
+
+def match_user_api_route(path: str) -> tuple[str, str] | None:
+    match = re.fullmatch(r"/api/users/([^/]+)/(.+)", path)
+    if not match:
+        return None
+    return unquote(match.group(1)), match.group(2)
+
+
+def parse_int_param(query: dict[str, list[str]], key: str, *, default: int) -> int:
+    values = query.get(key)
+    if not values or not values[0].strip():
+        return default
+    try:
+        return int(values[0])
+    except ValueError as exc:
+        raise ValueError(f"invalid integer for {key}") from exc
+
+
+def parse_bool_param(query: dict[str, list[str]], key: str, *, default: bool) -> bool:
+    values = query.get(key)
+    if not values or not values[0].strip():
+        return default
+    value = values[0].strip().lower()
+    if value in {"1", "true", "yes", "y"}:
+        return True
+    if value in {"0", "false", "no", "n"}:
+        return False
+    raise ValueError(f"invalid boolean for {key}")
+
+
+def load_user_profile_payload(db_path: Path, *, user_id: str) -> dict[str, object]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        user_row = conn.execute(
+            """
+            SELECT id, display_name, language, timezone, created_at, updated_at
+            FROM users
+            WHERE id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        if user_row is None:
+            raise ValueError(f"user not found: {user_id}")
+
+        defaults_row = conn.execute(
+            """
+            SELECT default_currency, default_precision_mode, default_condition_mode,
+                   default_delivery_mode, default_min_match_score, default_cooldown_hours,
+                   default_allow_related_matches, default_allow_series_matches, default_allow_variant_matches,
+                   notes, created_at, updated_at
+            FROM user_profile_defaults_v2
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+        interest_rows = conn.execute(
+            """
+            SELECT
+              id, interest_name, interest_kind, scope_kind, precision_mode, interest_priority,
+              intent_confidence, allow_related_matches, allow_series_matches, allow_variant_matches,
+              active_status, notes, created_at, updated_at
+            FROM user_interests_v2
+            WHERE user_id = ?
+            ORDER BY
+              CASE interest_priority WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+              updated_at DESC,
+              id
+            """,
+            (user_id,),
+        ).fetchall()
+
+        interests: list[dict[str, object]] = []
+        active_interest_count = 0
+        active_target_count = 0
+        active_holding_count = 0
+        active_signal_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM signals_v2 WHERE user_id = ? AND status = 'active'",
+                (user_id,),
+            ).fetchone()[0]
+        )
+        active_match_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM listing_matches_v2 WHERE user_id = ? AND status = 'active'",
+                (user_id,),
+            ).fetchone()[0]
+        )
+
+        for row in interest_rows:
+            interest = dict(row)
+            interest_id = str(row["id"])
+            targets = [
+                normalize_sqlite_row(target)
+                for target in conn.execute(
+                    """
+                    SELECT
+                      id, target_label, target_kind, parse_family, raw_input, normalized_name,
+                      issue_code_norm, issue_part_token, series_key, theme_name, asset_type,
+                      variant_tokens_json, quantity_tokens_json, condition_tokens_json,
+                      year_value, budget_min, budget_max, strictness_override, priority_override,
+                      is_active, created_at, updated_at, condition_mode
+                    FROM user_interest_targets_v2
+                    WHERE interest_id = ?
+                    ORDER BY is_active DESC, updated_at DESC, id
+                    """,
+                    (interest_id,),
+                ).fetchall()
+            ]
+            holdings = [
+                normalize_sqlite_row(holding)
+                for holding in conn.execute(
+                    """
+                    SELECT
+                      id, raw_input, parse_family, normalized_name, issue_code_norm, issue_part_token,
+                      series_key, theme_name, asset_type, variant_tokens_json, quantity_tokens_json,
+                      condition_tokens_json, year_value, holding_quantity, cost_basis_total,
+                      cost_basis_unit, acquired_at, notes, is_active, created_at, updated_at
+                    FROM user_holdings_v2
+                    WHERE linked_interest_id = ?
+                    ORDER BY is_active DESC, updated_at DESC, id
+                    """,
+                    (interest_id,),
+                ).fetchall()
+            ]
+            policy_row = conn.execute(
+                """
+                SELECT
+                  id, notify_on_preview, notify_on_live, notify_on_ended,
+                  notify_on_exact_match, notify_on_variant_match, notify_on_series_match,
+                  notify_on_price_opportunity, notify_on_sell_opportunity,
+                  min_match_score, cooldown_hours, delivery_mode, max_signals_per_day,
+                  created_at, updated_at
+                FROM user_interest_signal_policies_v2
+                WHERE interest_id = ?
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (interest_id,),
+            ).fetchone()
+            active_interest_count += 1 if interest.get("active_status") == "active" else 0
+            active_target_count += sum(1 for target in targets if int(target.get("is_active") or 0) == 1)
+            active_holding_count += sum(1 for holding in holdings if int(holding.get("is_active") or 0) == 1)
+            interest["targets"] = [decode_json_fields(target) for target in targets]
+            interest["holdings"] = [decode_json_fields(holding) for holding in holdings]
+            interest["signal_policy"] = normalize_sqlite_row(policy_row) if policy_row is not None else None
+            interests.append(interest)
+
+    return {
+        "ok": True,
+        "user": normalize_sqlite_row(user_row),
+        "defaults": normalize_sqlite_row(defaults_row) if defaults_row is not None else None,
+        "summary": {
+            "active_interest_count": active_interest_count,
+            "active_target_count": active_target_count,
+            "active_holding_count": active_holding_count,
+            "active_match_count": active_match_count,
+            "active_signal_count": active_signal_count,
+        },
+        "interests": interests,
+    }
+
+
+def load_user_reports_payload(reports_dir: Path, *, user_id: str) -> dict[str, object]:
+    reports = report_entries(reports_dir)
+    user_reports = []
+    shared_reports = []
+    for item in reports:
+        kind = str(item["kind"])
+        scope = str(item["scope"])
+        if scope == f"Collector: {user_id}":
+            user_reports.append(enrich_report_links(item))
+        elif kind in {"interest_digest_index", "signal_review_index", "user_base_review"}:
+            shared_reports.append(enrich_report_links(item))
+
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "reports": user_reports,
+        "shared_reports": shared_reports,
+        "latest": {
+            "digest": latest_report_metadata(reports_dir, "interest_digest_user", user_id=user_id),
+            "signal_review": latest_report_metadata(reports_dir, "signal_review_user", user_id=user_id),
+            "daily_review": latest_report_metadata(reports_dir, "user_base_review"),
+        },
+    }
+
+
+def load_latest_digest_payload(
+    *,
+    db_path: Path,
+    reports_dir: Path,
+    user_id: str,
+    lookback_hours: int,
+) -> dict[str, object]:
+    report_path = latest_user_report_path(reports_dir, user_id=user_id, kind="interest_digest_user")
+    if report_path is None:
+        created = build_interest_digest_report(str(db_path), str(reports_dir), user_id=user_id, lookback_hours=lookback_hours)
+        report_path = Path(created.report_path)
+    if report_path is None or not report_path.exists():
+        raise ValueError(f"latest digest not found for user: {user_id}")
+    metadata = classify_report(report_path.name)
+    stat = report_path.stat()
+    markdown = report_path.read_text(encoding="utf-8")
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "report": {
+            "name": report_path.name,
+            "kind": metadata["kind"],
+            "label": metadata["label"],
+            "scope": metadata["scope"],
+            "timestamp_label": metadata["timestamp_label"],
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "links": {
+                "rendered": f"/reports/{quote(report_path.name)}",
+                "raw": f"/raw/{quote(report_path.name)}",
+            },
+        },
+        "markdown": markdown,
+        "lookback_hours": lookback_hours,
+    }
+
+
+def run_matching_payload(db_path: Path, *, user_id: str, only_active_listings: bool) -> dict[str, object]:
+    result = run_v2_matching(str(db_path), user_id=user_id, only_active_listings=only_active_listings)
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "only_active_listings": only_active_listings,
+        "result": normalize_dataclass(result),
+    }
+
+
+def run_signals_payload(db_path: Path, *, user_id: str, lookback_hours: int) -> dict[str, object]:
+    result = run_interest_signal_generation(str(db_path), user_id=user_id, lookback_hours=lookback_hours)
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "lookback_hours": lookback_hours,
+        "result": normalize_dataclass(result),
+    }
+
+
+def latest_user_report_path(reports_dir: Path, *, user_id: str, kind: str) -> Path | None:
+    for item in report_entries(reports_dir):
+        if item["kind"] == kind and item["scope"] == f"Collector: {user_id}":
+            return reports_dir / str(item["name"])
+    return None
+
+
+def latest_report_metadata(reports_dir: Path, kind: str, *, user_id: str | None = None) -> dict[str, object] | None:
+    for item in report_entries(reports_dir):
+        if item["kind"] != kind:
+            continue
+        if user_id is not None and item["scope"] != f"Collector: {user_id}":
+            continue
+        return enrich_report_links(item)
+    return None
+
+
+def enrich_report_links(item: dict[str, object]) -> dict[str, object]:
+    enriched = dict(item)
+    name = str(item["name"])
+    enriched["links"] = {
+        "rendered": f"/reports/{quote(name)}",
+        "raw": f"/raw/{quote(name)}",
+        "latest_of_type": f"/latest/{quote(str(item['kind']))}",
+    }
+    return enriched
+
+
+def normalize_sqlite_row(row: sqlite3.Row | None) -> dict[str, object]:
+    if row is None:
+        return {}
+    return {key: row[key] for key in row.keys()}
+
+
+def normalize_dataclass(value: object) -> dict[str, object]:
+    return {key: getattr(value, key) for key in value.__dataclass_fields__.keys()}  # type: ignore[attr-defined]
+
+
+def decode_json_fields(payload: dict[str, object]) -> dict[str, object]:
+    decoded = dict(payload)
+    for key in ("variant_tokens_json", "quantity_tokens_json", "condition_tokens_json"):
+        raw = decoded.get(key)
+        if not isinstance(raw, str):
+            continue
+        try:
+            decoded[key.removesuffix("_json")] = json.loads(raw)
+        except json.JSONDecodeError:
+            decoded[key.removesuffix("_json")] = []
+    return decoded
 
 
 def classify_report(name: str) -> dict[str, str]:
