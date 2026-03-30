@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from ai_agent_v2.parsing.listing_parser import run_listing_parse_v2
@@ -209,7 +210,13 @@ def test_interest_digest_report_summarizes_recent_activity_and_ended_comps(tmp_p
         conn.commit()
 
     run_listing_parse_v2(str(db_path))
-    result = build_interest_digest_report(str(db_path), str(reports_dir), user_id="u-digest", lookback_hours=24)
+    result = build_interest_digest_report(
+        str(db_path),
+        str(reports_dir),
+        user_id="u-digest",
+        lookback_hours=24,
+        now_utc=datetime.fromisoformat(now),
+    )
 
     content = Path(result.report_path).read_text(encoding="utf-8")
     assert result.interest_count == 1

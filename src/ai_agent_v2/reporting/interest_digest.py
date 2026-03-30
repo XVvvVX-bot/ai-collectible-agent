@@ -27,11 +27,12 @@ def build_interest_digest_report(
     *,
     user_id: str,
     lookback_hours: int = 24,
+    now_utc: datetime | None = None,
 ) -> InterestDigestReportResult:
     SqliteV2Store(db_path).ensure_schema()
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    since_iso = _since_iso(lookback_hours)
+    since_iso = _since_iso(lookback_hours, now_utc=now_utc)
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -489,8 +490,9 @@ def _render_report(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _since_iso(hours: int) -> str:
-    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+def _since_iso(hours: int, *, now_utc: datetime | None = None) -> str:
+    current = now_utc or datetime.now(timezone.utc)
+    return (current - timedelta(hours=hours)).isoformat()
 
 
 def _is_at_or_after(value: Any, since_iso: str) -> bool:
