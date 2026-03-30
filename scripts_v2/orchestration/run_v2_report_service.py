@@ -113,10 +113,12 @@ def main() -> int:
         runtime=runner.start_event()["runtime"],
         routes=[
             "/",
+            "/interests",
             "/matches",
             "/healthz",
             "/api/reports",
             "/api/users/<user_id>/profile",
+            "/api/users/<user_id>/interests",
             "/api/users/<user_id>/reports",
             "/api/users/<user_id>/matches",
             "/api/users/<user_id>/signals",
@@ -163,6 +165,16 @@ def build_handler(
             if user_route is not None:
                 user_id, action = user_route
                 self._handle_user_api_get(user_id=user_id, action=action, query=parse_qs(parsed.query))
+                return
+            if path == "/interests":
+                interests_user_id = first_query_value(parse_qs(parsed.query), "user_id") or default_user_id
+                self._write_html(
+                    HTTPStatus.OK,
+                    render_interests_html(
+                        db_path=db_path,
+                        user_id=interests_user_id,
+                    ),
+                )
                 return
             if path == "/matches":
                 matches_user_id = first_query_value(parse_qs(parsed.query), "user_id") or default_user_id
@@ -239,6 +251,10 @@ def build_handler(
             try:
                 if action == "profile":
                     payload = load_user_profile_payload(db_path, user_id=user_id)
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+                if action == "interests":
+                    payload = load_user_interests_payload(db_path, user_id=user_id)
                     self._write_json(HTTPStatus.OK, payload)
                     return
                 if action == "reports":
@@ -527,6 +543,116 @@ def load_user_profile_payload(db_path: Path, *, user_id: str) -> dict[str, objec
             "active_signal_count": active_signal_count,
         },
         "interests": interests,
+    }
+
+
+def load_user_interests_payload(db_path: Path, *, user_id: str) -> dict[str, object]:
+    profile_payload = load_user_profile_payload(db_path, user_id=user_id)
+    interests = profile_payload["interests"] if isinstance(profile_payload.get("interests"), list) else []
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        signal_count_rows = conn.execute(
+            """
+            SELECT interest_id, COUNT(*) AS signal_count
+            FROM signals_v2
+            WHERE user_id = ? AND status = 'active'
+            GROUP BY interest_id
+            """,
+            (user_id,),
+        ).fetchall()
+        match_count_rows = conn.execute(
+            """
+            SELECT t.interest_id, COUNT(*) AS match_count
+            FROM listing_matches_v2 m
+            JOIN user_interest_targets_v2 t ON t.id = m.user_item_id
+            WHERE m.user_id = ? AND m.status = 'active'
+            GROUP BY t.interest_id
+            """,
+            (user_id,),
+        ).fetchall()
+
+    signal_count_by_interest = {str(row["interest_id"]): int(row["signal_count"]) for row in signal_count_rows}
+    match_count_by_interest = {str(row["interest_id"]): int(row["match_count"]) for row in match_count_rows}
+
+    enriched_interests: list[dict[str, object]] = []
+    interest_kind_counts: dict[str, int] = {}
+    high_priority_count = 0
+    immediate_policy_count = 0
+    total_target_count = 0
+    total_holding_count = 0
+    interests_with_holdings = 0
+
+    for raw_interest in interests:
+        if not isinstance(raw_interest, dict):
+            continue
+        interest = dict(raw_interest)
+        interest_id = str(interest.get("id") or "")
+        targets = interest.get("targets") if isinstance(interest.get("targets"), list) else []
+        holdings = interest.get("holdings") if isinstance(interest.get("holdings"), list) else []
+        policy = interest.get("signal_policy") if isinstance(interest.get("signal_policy"), dict) else {}
+        active_target_count = sum(1 for target in targets if isinstance(target, dict) and int(target.get("is_active") or 0) == 1)
+        active_holding_count = sum(1 for holding in holdings if isinstance(holding, dict) and int(holding.get("is_active") or 0) == 1)
+        target_labels = [str(target.get("target_label")) for target in targets if isinstance(target, dict) and target.get("target_label")]
+        holding_labels = [str(holding.get("raw_input") or holding.get("normalized_name")) for holding in holdings if isinstance(holding, dict)]
+        signal_count = signal_count_by_interest.get(interest_id, 0)
+        match_count = match_count_by_interest.get(interest_id, 0)
+
+        interest_kind = str(interest.get("interest_kind") or "unknown")
+        interest_kind_counts[interest_kind] = interest_kind_counts.get(interest_kind, 0) + 1
+        if str(interest.get("interest_priority") or "") == "high":
+            high_priority_count += 1
+        if str(policy.get("delivery_mode") or "") == "immediate":
+            immediate_policy_count += 1
+        total_target_count += active_target_count
+        total_holding_count += active_holding_count
+        if active_holding_count:
+            interests_with_holdings += 1
+
+        interest["summary"] = {
+            "active_target_count": active_target_count,
+            "active_holding_count": active_holding_count,
+            "active_signal_count": signal_count,
+            "active_match_count": match_count,
+            "has_holdings": active_holding_count > 0,
+            "primary_target_label": target_labels[0] if target_labels else None,
+            "target_labels": target_labels,
+            "holding_labels": holding_labels,
+            "delivery_mode": policy.get("delivery_mode"),
+            "budget_max": next(
+                (
+                    target.get("budget_max")
+                    for target in targets
+                    if isinstance(target, dict) and target.get("budget_max") is not None
+                ),
+                None,
+            ),
+        }
+        enriched_interests.append(interest)
+
+    enriched_interests.sort(
+        key=lambda item: (
+            0 if str(item.get("interest_priority") or "") == "high" else 1,
+            -int(((item.get("summary") or {}).get("active_signal_count") or 0)),
+            -int(((item.get("summary") or {}).get("active_match_count") or 0)),
+            str(item.get("interest_name") or ""),
+        )
+    )
+
+    return {
+        "ok": True,
+        "user": profile_payload["user"],
+        "defaults": profile_payload.get("defaults"),
+        "summary": {
+            "active_interest_count": len(enriched_interests),
+            "active_target_count": total_target_count,
+            "active_holding_count": total_holding_count,
+            "interests_with_holdings": interests_with_holdings,
+            "high_priority_count": high_priority_count,
+            "immediate_policy_count": immediate_policy_count,
+        },
+        "interest_kind_counts": interest_kind_counts,
+        "interests": enriched_interests,
     }
 
 
@@ -1570,9 +1696,9 @@ def render_dashboard_html(
     <nav>
       <a href="#overview">Overview</a>
       <a href="#signals">Signals</a>
+      <a href="/interests?user_id={quote(user_id)}">Interests</a>
       <a href="/matches?user_id={quote(user_id)}">Opportunities</a>
       <a href="#digest">Digest</a>
-      <a href="#interests">Interests</a>
       <a href="#reports">Reports</a>
       <a href="#api">API</a>
     </nav>
@@ -1673,6 +1799,7 @@ def render_dashboard_html(
           <h2>Priority Interests</h2>
           <p>The most important tracked interests, with signal policy and budget context.</p>
         </div>
+        <a href="/interests?user_id={quote(user_id)}">Open full interests page</a>
       </div>
       <div class="interest-grid">{interest_cards_html}</div>
     </section>
@@ -1728,6 +1855,13 @@ def render_dashboard_html(
             <span class="pill">Profile</span>
             <h3><a href="/api/users/{quote(user_id)}/profile">/api/users/{html.escape(user_id)}/profile</a></h3>
             <p>Interests, targets, holdings, signal policies, and top-level summary counts.</p>
+          </div>
+        </article>
+        <article class="report-row">
+          <div>
+            <span class="pill">Interests</span>
+            <h3><a href="/api/users/{quote(user_id)}/interests">/api/users/{html.escape(user_id)}/interests</a></h3>
+            <p>Frontend-ready interest inventory with per-interest counts, target labels, holdings, and policy summaries.</p>
           </div>
         </article>
         <article class="report-row">
@@ -1818,6 +1952,245 @@ def render_signals_inbox(
     </div>
     <div class="signal-interest-grid">{group_cards}</div>
     """
+
+
+def render_interests_html(
+    *,
+    db_path: Path,
+    user_id: str,
+) -> str:
+    payload = load_user_interests_payload(db_path, user_id=user_id)
+    user = payload["user"]
+    summary = payload["summary"] if isinstance(payload.get("summary"), dict) else {}
+    interest_kind_counts = payload["interest_kind_counts"] if isinstance(payload.get("interest_kind_counts"), dict) else {}
+    interests = payload["interests"] if isinstance(payload.get("interests"), list) else []
+
+    kind_cards_html = "\n".join(
+        f"""
+        <article class="summary-card">
+          <span class="eyebrow">{html.escape(kind.replace('_', ' ').title())}</span>
+          <strong>{count}</strong>
+        </article>
+        """
+        for kind, count in sorted(interest_kind_counts.items())
+    ) or '<p class="empty-state">No active interest kinds found yet.</p>'
+    interest_cards_html = "\n".join(
+        render_interest_detail_card(interest, user_id=user_id)
+        for interest in interests
+        if isinstance(interest, dict)
+    ) or '<p class="empty-state">No active interests found yet.</p>'
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Interest Management</title>
+  <style>
+    :root {{
+      --bg: #f4ede1;
+      --panel: rgba(255, 250, 244, 0.88);
+      --panel-strong: #fff9f0;
+      --border: #decaae;
+      --ink: #1d2128;
+      --muted: #706658;
+      --accent: #8f3911;
+      --accent-soft: #f1e0cb;
+      --accent-deep: #4e2513;
+      --shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(188, 121, 48, 0.18), transparent 22%),
+        radial-gradient(circle at 80% 10%, rgba(124, 86, 43, 0.1), transparent 20%),
+        linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
+    }}
+    main {{ max-width: 1120px; margin: 0 auto; padding: 36px 20px 60px; }}
+    nav {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 18px;
+    }}
+    nav a {{
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(255, 250, 244, 0.78);
+      color: var(--muted);
+      font-size: 0.92rem;
+      text-decoration: none;
+    }}
+    .hero, .section {{
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 24px;
+      margin-bottom: 22px;
+      box-shadow: var(--shadow);
+    }}
+    .hero {{
+      background: linear-gradient(135deg, rgba(255, 247, 236, 0.98), rgba(241, 223, 195, 0.9));
+    }}
+    .hero h1 {{
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2.1rem, 4vw, 3.3rem);
+      letter-spacing: -0.04em;
+      margin: 0 0 10px;
+    }}
+    .hero p, .section p {{
+      color: var(--muted);
+      line-height: 1.6;
+    }}
+    .eyebrow {{
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }}
+    .chip-row, .detail-row, .meta-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }}
+    .chip, .pill {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 7px 11px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.84rem;
+      font-weight: 600;
+      border: 1px solid var(--border);
+    }}
+    .summary-grid, .interest-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 14px;
+    }}
+    .interest-grid {{
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    }}
+    .summary-card, .interest-detail-card {{
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }}
+    .summary-card strong {{
+      display: block;
+      font-size: 1.9rem;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--accent-deep);
+      margin-top: 8px;
+    }}
+    .section-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 18px;
+    }}
+    .interest-detail-card h3 {{
+      margin: 0;
+      font-size: 1.18rem;
+      line-height: 1.3;
+    }}
+    .interest-detail-card p {{
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }}
+    .stack {{
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+    }}
+    .subpanel {{
+      background: rgba(255, 250, 244, 0.76);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 14px;
+    }}
+    .subpanel h4 {{
+      margin: 0 0 8px;
+      font-size: 0.98rem;
+      color: var(--accent-deep);
+    }}
+    ul {{
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      display: grid;
+      gap: 6px;
+    }}
+    code {{
+      font-family: "JetBrains Mono", "Cascadia Code", monospace;
+      background: #efe4d4;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }}
+    a {{ color: var(--accent); text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    .empty-state {{ color: var(--muted); margin: 0; }}
+  </style>
+</head>
+<body>
+  <main>
+    <nav>
+      <a href="/?user_id={quote(user_id)}">Dashboard</a>
+      <a href="/interests?user_id={quote(user_id)}">Interests</a>
+      <a href="/matches?user_id={quote(user_id)}">Opportunities</a>
+      <a href="/api/users/{quote(user_id)}/interests">Interests JSON</a>
+      <a href="/api/users/{quote(user_id)}/profile">Profile JSON</a>
+    </nav>
+    <section class="hero">
+      <span class="eyebrow">Interest Management</span>
+      <h1>{html.escape(str(user["display_name"]))}</h1>
+      <p>Inspect the collector's active interests, targets, holdings, signal policies, and the current operational pressure around each idea.</p>
+      <div class="chip-row">
+        <span class="chip">User <code>{html.escape(str(user["id"]))}</code></span>
+        <span class="chip">Language <code>{html.escape(str(user["language"]))}</code></span>
+        <span class="chip">Timezone <code>{html.escape(str(user["timezone"]))}</code></span>
+      </div>
+    </section>
+    <section class="summary-grid">
+      <article class="summary-card"><span class="eyebrow">Active Interests</span><strong>{summary.get("active_interest_count", 0)}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Active Targets</span><strong>{summary.get("active_target_count", 0)}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Tracked Holdings</span><strong>{summary.get("active_holding_count", 0)}</strong></article>
+      <article class="summary-card"><span class="eyebrow">High Priority</span><strong>{summary.get("high_priority_count", 0)}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Immediate Delivery</span><strong>{summary.get("immediate_policy_count", 0)}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Interests With Holdings</span><strong>{summary.get("interests_with_holdings", 0)}</strong></article>
+    </section>
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>Interest Mix</h2>
+          <p>How this collector's active interests are distributed by kind.</p>
+        </div>
+      </div>
+      <div class="summary-grid">{kind_cards_html}</div>
+    </section>
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>All Active Interests</h2>
+          <p>Each card includes the current target, policy, holdings, and live match/signal counts.</p>
+        </div>
+      </div>
+      <div class="interest-grid">{interest_cards_html}</div>
+    </section>
+  </main>
+</body>
+</html>"""
 
 
 def render_matches_html(
@@ -2164,6 +2537,85 @@ def render_interest_card(interest: dict[str, object]) -> str:
       <p>{budget_text}</p>
       <p>Delivery <strong>{html.escape(str(policy.get("delivery_mode") or "-"))}</strong> | cooldown <strong>{html.escape(str(policy.get("cooldown_hours") or "-"))}h</strong></p>
       {holding_text}
+    </article>
+    """
+
+
+def render_interest_detail_card(interest: dict[str, object], *, user_id: str) -> str:
+    summary = interest.get("summary") if isinstance(interest.get("summary"), dict) else {}
+    targets = interest.get("targets") if isinstance(interest.get("targets"), list) else []
+    holdings = interest.get("holdings") if isinstance(interest.get("holdings"), list) else []
+    policy = interest.get("signal_policy") if isinstance(interest.get("signal_policy"), dict) else {}
+    notes = str(interest.get("notes") or "").strip()
+
+    target_items = []
+    for target in targets[:3]:
+        if not isinstance(target, dict):
+            continue
+        budget = target.get("budget_max")
+        budget_label = f"budget {budget}" if budget is not None else "no budget cap"
+        target_items.append(
+            f"<li><strong>{html.escape(str(target.get('target_label') or '-'))}</strong> "
+            f"<span class=\"eyebrow\">{html.escape(str(target.get('target_kind') or '-'))}</span> | "
+            f"{html.escape(str(target.get('condition_mode') or '-'))} | {html.escape(budget_label)}</li>"
+        )
+    target_html = "".join(target_items) or "<li>No targets attached.</li>"
+
+    holding_items = []
+    for holding in holdings[:3]:
+        if not isinstance(holding, dict):
+            continue
+        holding_items.append(
+            f"<li><strong>{html.escape(str(holding.get('raw_input') or holding.get('normalized_name') or '-'))}</strong> | "
+            f"qty {html.escape(str(holding.get('holding_quantity') or '-'))} | "
+            f"cost {html.escape(str(holding.get('cost_basis_unit') or '-'))}</li>"
+        )
+    holding_html = "".join(holding_items) or "<li>No linked holdings.</li>"
+
+    policy_bits = [
+        f"delivery <strong>{html.escape(str(policy.get('delivery_mode') or '-'))}</strong>",
+        f"cooldown <strong>{html.escape(str(policy.get('cooldown_hours') or '-'))}h</strong>",
+        f"min score <strong>{html.escape(str(policy.get('min_match_score') or '-'))}</strong>",
+        f"signals/day <strong>{html.escape(str(policy.get('max_signals_per_day') or '-'))}</strong>",
+    ]
+    note_html = f"<p>{html.escape(notes)}</p>" if notes else "<p class=\"empty-state\">No operator notes attached.</p>"
+
+    return f"""
+    <article class="interest-detail-card">
+      <div class="meta-row">
+        <span class="pill">{html.escape(str(interest.get("interest_kind") or "-"))}</span>
+        <span class="pill">{html.escape(str(interest.get("scope_kind") or "-"))}</span>
+        <span class="pill">{html.escape(str(interest.get("precision_mode") or "-"))}</span>
+        <span class="pill">{html.escape(str(interest.get("interest_priority") or "-"))}</span>
+      </div>
+      <h3>{html.escape(str(interest.get("interest_name") or "-"))}</h3>
+      <p>Signals <strong>{html.escape(str(summary.get("active_signal_count") or 0))}</strong> | matches <strong>{html.escape(str(summary.get("active_match_count") or 0))}</strong> | targets <strong>{html.escape(str(summary.get("active_target_count") or 0))}</strong> | holdings <strong>{html.escape(str(summary.get("active_holding_count") or 0))}</strong></p>
+      <div class="stack">
+        <section class="subpanel">
+          <h4>Target Setup</h4>
+          <ul>{target_html}</ul>
+        </section>
+        <section class="subpanel">
+          <h4>Holdings</h4>
+          <ul>{holding_html}</ul>
+        </section>
+        <section class="subpanel">
+          <h4>Signal Policy</h4>
+          <p>{" | ".join(policy_bits)}</p>
+          <p>notify preview <strong>{html.escape(str(policy.get("notify_on_preview") or 0))}</strong> | live <strong>{html.escape(str(policy.get("notify_on_live") or 0))}</strong> | ended <strong>{html.escape(str(policy.get("notify_on_ended") or 0))}</strong></p>
+          <p>exact <strong>{html.escape(str(policy.get("notify_on_exact_match") or 0))}</strong> | variant <strong>{html.escape(str(policy.get("notify_on_variant_match") or 0))}</strong> | series <strong>{html.escape(str(policy.get("notify_on_series_match") or 0))}</strong></p>
+        </section>
+        <section class="subpanel">
+          <h4>Operator Notes</h4>
+          {note_html}
+        </section>
+      </div>
+      <div class="detail-row">
+        <a href="/api/users/{quote(user_id)}/interests">Interests JSON</a>
+        <a href="/api/users/{quote(user_id)}/signals">Signals JSON</a>
+        <a href="/api/users/{quote(user_id)}/matches">Matches JSON</a>
+        <a href="/matches?user_id={quote(user_id)}">Open opportunities</a>
+      </div>
     </article>
     """
 
