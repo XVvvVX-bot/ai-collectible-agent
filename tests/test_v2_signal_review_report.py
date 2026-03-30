@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from ai_agent_v2.reporting.signal_review import build_signal_review_report
 from ai_agent_v2.storage.sqlite_store import SqliteV2Store
+
+
+REFERENCE_NOW = datetime.fromisoformat("2026-03-29T12:00:00+00:00")
 
 
 def test_signal_review_report_separates_event_and_standing_signals(tmp_path: Path):
@@ -47,7 +51,13 @@ def test_signal_review_report_separates_event_and_standing_signals(tmp_path: Pat
         )
         conn.commit()
 
-    result = build_signal_review_report(str(db_path), str(reports_dir), user_id="u-review", lookback_hours=24)
+    result = build_signal_review_report(
+        str(db_path),
+        str(reports_dir),
+        user_id="u-review",
+        lookback_hours=24,
+        now_utc=REFERENCE_NOW,
+    )
     content = Path(result.report_path).read_text(encoding="utf-8")
 
     assert result.signal_count == 2

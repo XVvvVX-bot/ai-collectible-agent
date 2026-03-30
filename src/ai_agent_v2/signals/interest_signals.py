@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from ai_agent_v2.clients.zhaoonline import now_utc_iso
 from ai_agent_v2.reporting.interest_review import _load_recent_ended_comps
 from ai_agent_v2.storage.sqlite_store import SqliteV2Store
 
@@ -45,13 +44,15 @@ def run_interest_signal_generation(
     *,
     user_id: str | None = None,
     lookback_hours: int = 24,
+    now_utc: datetime | None = None,
 ) -> InterestSignalRunResult:
     store = SqliteV2Store(db_path)
     store.ensure_schema()
 
+    current_utc = now_utc or datetime.now(timezone.utc)
     run_id = str(uuid.uuid4())
-    started_at = now_utc_iso()
-    since_iso = _since_iso(lookback_hours)
+    started_at = current_utc.replace(microsecond=0).isoformat()
+    since_iso = _since_iso(lookback_hours, now_utc=current_utc)
 
     interests_processed = 0
     candidates = 0
@@ -77,7 +78,7 @@ def run_interest_signal_generation(
                     if _refresh_existing_signal(conn, candidate=candidate, now_iso=started_at):
                         updated += 1
                         continue
-                    if _is_in_cooldown(conn, candidate, cooldown_hours=cooldown_hours):
+                    if _is_in_cooldown(conn, candidate, cooldown_hours=cooldown_hours, now_utc=current_utc):
                         skipped_cooldown += 1
                         continue
                     _insert_signal(conn, run_id=run_id, candidate=candidate, now_iso=started_at)
@@ -92,7 +93,7 @@ def run_interest_signal_generation(
             _finish_signal_run(
                 conn,
                 run_id=run_id,
-                finished_at=now_utc_iso(),
+                finished_at=current_utc.replace(microsecond=0).isoformat(),
                 status="success",
                 interests_processed=interests_processed,
                 candidates=candidates,
@@ -107,7 +108,7 @@ def run_interest_signal_generation(
             _finish_signal_run(
                 conn,
                 run_id=run_id,
-                finished_at=now_utc_iso(),
+                finished_at=current_utc.replace(microsecond=0).isoformat(),
                 status="failed",
                 interests_processed=interests_processed,
                 candidates=candidates,
@@ -900,8 +901,15 @@ def _finish_signal_run(
     )
 
 
-def _is_in_cooldown(conn: sqlite3.Connection, candidate: SignalCandidate, *, cooldown_hours: int) -> bool:
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=cooldown_hours)).isoformat()
+def _is_in_cooldown(
+    conn: sqlite3.Connection,
+    candidate: SignalCandidate,
+    *,
+    cooldown_hours: int,
+    now_utc: datetime | None = None,
+) -> bool:
+    current = now_utc or datetime.now(timezone.utc)
+    cutoff = (current - timedelta(hours=cooldown_hours)).isoformat()
     row = conn.execute(
         """
         SELECT 1
@@ -1050,8 +1058,9 @@ def _signal_key(candidate: SignalCandidate) -> tuple[str, str, str]:
     )
 
 
-def _since_iso(hours: int) -> str:
-    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+def _since_iso(hours: int, *, now_utc: datetime | None = None) -> str:
+    current = now_utc or datetime.now(timezone.utc)
+    return (current - timedelta(hours=hours)).isoformat()
 
 
 def _is_at_or_after(value: Any, since_iso: str) -> bool:

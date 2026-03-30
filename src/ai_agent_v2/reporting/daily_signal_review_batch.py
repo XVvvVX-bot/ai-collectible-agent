@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
-from ai_agent_v2.clients.zhaoonline import now_utc_iso
 from ai_agent_v2.reporting.signal_review import build_signal_review_report
 from ai_agent_v2.storage.sqlite_store import SqliteV2Store
 
@@ -22,10 +22,12 @@ def build_daily_signal_review_batch(
     output_dir: str,
     *,
     lookback_hours: int = 24,
+    now_utc: datetime | None = None,
 ) -> DailySignalReviewBatchResult:
     SqliteV2Store(db_path).ensure_schema()
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    current_utc = now_utc or datetime.now(timezone.utc)
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -45,10 +47,11 @@ def build_daily_signal_review_batch(
             output_dir,
             user_id=str(row["id"]),
             lookback_hours=lookback_hours,
+            now_utc=current_utc,
         )
         for row in user_rows
     ]
-    timestamp = now_utc_iso().replace(":", "").replace("-", "").replace("+00:00", "Z")
+    timestamp = current_utc.replace(microsecond=0).isoformat().replace(":", "").replace("-", "").replace("+00:00", "Z")
     index_path = out_dir / f"v2_daily_signal_review_index_{timestamp}.md"
     index_path.write_text(
         _render_index(user_rows, per_user, lookback_hours=lookback_hours),

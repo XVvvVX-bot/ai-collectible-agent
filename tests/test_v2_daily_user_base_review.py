@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from ai_agent_v2.reporting.daily_user_base_review import build_daily_user_base_review_report
 from ai_agent_v2.storage.sqlite_store import SqliteV2Store
+
+
+REFERENCE_NOW = datetime.fromisoformat("2026-03-29T12:00:00+00:00")
 
 
 def test_daily_user_base_review_summarizes_active_v2_users(tmp_path: Path):
@@ -69,7 +73,12 @@ def test_daily_user_base_review_summarizes_active_v2_users(tmp_path: Path):
         )
         conn.commit()
 
-    result = build_daily_user_base_review_report(str(db_path), str(reports_dir), lookback_hours=24)
+    result = build_daily_user_base_review_report(
+        str(db_path),
+        str(reports_dir),
+        lookback_hours=24,
+        now_utc=REFERENCE_NOW,
+    )
     content = Path(result.report_path).read_text(encoding="utf-8")
 
     assert result.user_count == 1

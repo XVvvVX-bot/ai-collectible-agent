@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from ai_agent_v2.clients.zhaoonline import now_utc_iso
 from ai_agent_v2.storage.sqlite_store import SqliteV2Store
 
 EVENT_SIGNAL_TYPES = {
@@ -29,11 +28,13 @@ def build_signal_review_report(
     *,
     user_id: str,
     lookback_hours: int = 24,
+    now_utc: datetime | None = None,
 ) -> SignalReviewReportResult:
     SqliteV2Store(db_path).ensure_schema()
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    since_iso = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).isoformat()
+    current_utc = now_utc or datetime.now(timezone.utc)
+    since_iso = (current_utc - timedelta(hours=lookback_hours)).isoformat()
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -67,7 +68,7 @@ def build_signal_review_report(
             (user_id, since_iso),
         ).fetchall()
 
-    timestamp = now_utc_iso().replace(":", "").replace("-", "").replace("+00:00", "Z")
+    timestamp = current_utc.replace(microsecond=0).isoformat().replace(":", "").replace("-", "").replace("+00:00", "Z")
     report_path = out_dir / f"v2_signal_review_{user_id}_{timestamp}.md"
     report_path.write_text(_render_report(dict(user_row), signal_rows, lookback_hours=lookback_hours), encoding="utf-8")
     return SignalReviewReportResult(report_path=str(report_path), user_id=user_id, signal_count=len(signal_rows))

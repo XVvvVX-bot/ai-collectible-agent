@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ai_agent_v2.reporting.daily_user_base_review import build_daily_user_base_review_report
@@ -49,6 +49,7 @@ def run_daily_user_base_review_cycle(
         db_path,
         output_dir,
         lookback_hours=lookback_hours,
+        now_utc=local_now.astimezone(timezone.utc),
     )
     state_path.write_text(
         json.dumps(

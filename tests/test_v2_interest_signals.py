@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from ai_agent_v2.parsing.listing_parser import run_listing_parse_v2
 from ai_agent_v2.signals.interest_signals import run_interest_signal_generation
 from ai_agent_v2.storage.sqlite_store import SqliteV2Store
+
+
+REFERENCE_NOW = datetime.fromisoformat("2026-03-29T12:00:00+00:00")
 
 
 def _insert_listing(
@@ -218,7 +222,12 @@ def test_interest_signals_generate_buy_and_sell_candidates(tmp_path: Path):
         conn.commit()
 
     run_listing_parse_v2(str(db_path))
-    result = run_interest_signal_generation(str(db_path), user_id="u-signal", lookback_hours=24)
+    result = run_interest_signal_generation(
+        str(db_path),
+        user_id="u-signal",
+        lookback_hours=24,
+        now_utc=REFERENCE_NOW,
+    )
 
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
@@ -354,7 +363,12 @@ def test_interest_signals_refresh_existing_rows_and_deactivate_stale_rows(tmp_pa
         conn.commit()
 
     run_listing_parse_v2(str(db_path))
-    result = run_interest_signal_generation(str(db_path), user_id="u-refresh", lookback_hours=24)
+    result = run_interest_signal_generation(
+        str(db_path),
+        user_id="u-refresh",
+        lookback_hours=24,
+        now_utc=REFERENCE_NOW,
+    )
 
     with sqlite3.connect(db_path) as conn:
         active_types = [row[0] for row in conn.execute("SELECT signal_type FROM signals_v2 WHERE user_id='u-refresh' AND status='active'")]
@@ -460,7 +474,12 @@ def test_required_condition_treats_new_vs_used_as_hard_conflict(tmp_path: Path):
         conn.commit()
 
     run_listing_parse_v2(str(db_path))
-    result = run_interest_signal_generation(str(db_path), user_id="u-cond", lookback_hours=24)
+    result = run_interest_signal_generation(
+        str(db_path),
+        user_id="u-cond",
+        lookback_hours=24,
+        now_utc=REFERENCE_NOW,
+    )
 
     with sqlite3.connect(db_path) as conn:
         payload = json.loads(
@@ -607,7 +626,12 @@ def test_interest_signals_emit_event_driven_buy_and_sell_signals(tmp_path: Path)
         conn.commit()
 
     run_listing_parse_v2(str(db_path))
-    result = run_interest_signal_generation(str(db_path), user_id="u-evt", lookback_hours=24)
+    result = run_interest_signal_generation(
+        str(db_path),
+        user_id="u-evt",
+        lookback_hours=24,
+        now_utc=REFERENCE_NOW,
+    )
 
     with sqlite3.connect(db_path) as conn:
         signal_types = [row[0] for row in conn.execute("SELECT signal_type FROM signals_v2 WHERE user_id='u-evt' ORDER BY signal_type")]
