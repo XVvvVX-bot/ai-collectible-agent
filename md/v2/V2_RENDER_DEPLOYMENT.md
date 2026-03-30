@@ -12,17 +12,20 @@ This is the current "off the laptop" deployment path. It is not yet the future P
 
 ## What This Deployment Does
 
-- runs the long-lived report web service in `scripts_v2/orchestration/run_v2_report_service.py`
+The current Render service:
+
+- runs `scripts_v2/orchestration/run_v2_report_service.py`
 - keeps runtime files under `/opt/render/project/src/runtime`
 - stores the current V2 SQLite database on the attached Render disk
-- serves a report index and report pages over HTTP
+- serves the collector dashboard and report pages over HTTP
+- exposes the thin V2 API
 - keeps the live incremental and daily review/report loops running in a background thread
 
 ## Current Render Files
 
 - root blueprint: `render.yaml`
-- worker entrypoint: `scripts_v2/orchestration/run_v2_background_worker.py`
-- web/report entrypoint: `scripts_v2/orchestration/run_v2_report_service.py`
+- background/local helper entrypoint: `scripts_v2/orchestration/run_v2_background_worker.py`
+- current deployed web entrypoint: `scripts_v2/orchestration/run_v2_report_service.py`
 
 ## Current Runtime Paths On Render
 
@@ -32,6 +35,8 @@ This is the current "off the laptop" deployment path. It is not yet the future P
   `/opt/render/project/src/runtime/data/agent_v2.db`
 - reports:
   `/opt/render/project/src/runtime/reports_v2`
+- exports:
+  `/opt/render/project/src/runtime/exports`
 - state files:
   `/opt/render/project/src/runtime/data/state`
 - secret file fallback:
@@ -43,35 +48,39 @@ The checked-in V2 code still uses `sqlite3` directly in many modules.
 
 That means the simplest cloud deployment today is:
 
-- Render worker
+- Render web service
 - persistent disk
-- SQLite database copied from local development
+- SQLite database copied from local development or maintained directly on Render
 
-This is already isolated from the developer laptop because both the worker and the database file live on Render infrastructure.
+This is already isolated from the developer laptop because both the service and the database file live on Render infrastructure.
 
-## First Deployment Flow
+## Current Deployment Flow
 
 1. push the branch containing `render.yaml`
-2. create a Render Blueprint from the GitHub repo
-3. let Render create the web service and disk
+2. create or sync the Render Blueprint from GitHub
+3. let Render create/update the web service and disk
 4. set `ZHAO_V2_SECRET`
 5. confirm the service starts successfully in logs
-6. open the Render service URL to browse reports
+6. open the Render service URL
 
-## Importing The Current Local Database
+Important:
 
-If the cloud worker starts with a mostly empty fresh database, the simplest way to bring over the current working state is to copy the local `data/agent_v2.db` file onto the Render disk.
+- when `render.yaml` changes, Render may require a Blueprint sync, not only a manual code deploy
 
-The current tested path is:
+## Importing Or Restoring The Working Database
+
+If the cloud service starts with a mostly empty fresh database, the simplest way to bring over the current working state is to copy the local `data/agent_v2.db` file onto the Render disk.
+
+The tested path is:
 
 1. open Render Shell
 2. move aside the existing cloud DB if needed
 3. transfer the local DB with Magic Wormhole
 4. keep the uploaded file as `agent_v2.db`
-5. point `ZHAO_V2_DATABASE_PATH` at that uploaded DB
-6. redeploy the worker
+5. confirm `ZHAO_V2_DATABASE_PATH` points at that file
+6. redeploy if needed
 
-### Example Render Shell Paths
+### Example Render Shell Commands
 
 Move aside the current DB:
 
@@ -86,6 +95,21 @@ Receive the uploaded file:
 wormhole receive <code-from-local-machine>
 ```
 
+Verify the restored DB:
+
+```bash
+python - <<'PY'
+import sqlite3
+db="/opt/render/project/src/runtime/data/agent_v2.db"
+conn=sqlite3.connect(db)
+cur=conn.cursor()
+print("users", cur.execute("select count(*) from users").fetchone()[0])
+print("active_v2_interests", cur.execute("select count(*) from user_interests_v2 where active_status='active'").fetchone()[0])
+print("active_matches_v2", cur.execute("select count(*) from listing_matches_v2 where status='active'").fetchone()[0])
+print("active_signals_v2", cur.execute("select count(*) from signals_v2 where status='active'").fetchone()[0])
+PY
+```
+
 ## Required Environment Variables
 
 Current important Render env vars:
@@ -97,17 +121,13 @@ Current important Render env vars:
 - `APP_DAILY_CHECK_MINUTES`
 - `APP_DAILY_LOOKBACK_HOURS`
 - `APP_LOOP_SLEEP_SECONDS`
+- `APP_DEFAULT_USER_ID`
 - `ZHAO_V2_MAX_WINDOWS_PER_RUN`
 - `ZHAO_V2_MIN_INTERVAL_SEC`
 
 Current checked-in database path in `render.yaml`:
 
 - `/opt/render/project/src/runtime/data/agent_v2.db`
-
-If the DB filename changes later, update both:
-
-- the Render environment variable
-- `render.yaml`
 
 ## Logs To Expect
 
@@ -118,27 +138,37 @@ Healthy startup logs include:
 - `incremental_cycle`
 - `daily_cycles`
 
-## Report Browser Routes
+Healthy behavior examples:
 
-The Render service now serves reports directly from the runtime disk.
+- `skip_reason="no_completed_window"` means there was no closed sync window available yet
+- `skip_reason="already_ran_today"` means the once-per-day daily report guard is working
+- `reason="missing_secret"` means the service is up but sync will skip until `ZHAO_V2_SECRET` is available
 
-Main routes:
+## Current Dashboard / Report / API Routes
+
+The Render service now exposes:
+
+### HTML
 
 - `/`
 - `/healthz`
-- `/api/reports`
+- `/latest/<kind>`
 - `/reports/<filename>`
 - `/raw/<filename>`
 - `/downloads/<bundle-name>`
 
-Healthy behavior examples:
+### JSON API
 
-- `skip_reason="no_completed_window"` means there was simply no closed sync window available yet
-- `skip_reason="already_ran_today"` means the once-per-day daily report guard is working
+- `/api/reports`
+- `/api/users/{user_id}/profile`
+- `/api/users/{user_id}/reports`
+- `/api/users/{user_id}/digest/latest`
+- `/api/users/{user_id}/matching/run`
+- `/api/users/{user_id}/signals/run`
 
 ## Manual Report Refresh On Render
 
-If daily reports already ran before a DB import, remove the state files and rerun them manually.
+If daily reports already ran before a DB restore, remove the state files and rerun them manually.
 
 Clear once-per-day guards:
 
@@ -159,11 +189,6 @@ python scripts_v2/orchestration/run_v2_daily_interest_digest_cycle.py --db-path 
 
 ## Packaging Reports For Download
 
-The simplest current way to retrieve reports from Render is:
-
-1. package the latest report markdown files into one zip
-2. transfer that zip off the Render shell
-
 Create a zip bundle:
 
 ```bash
@@ -175,19 +200,19 @@ That creates a zip like:
 
 - `/opt/render/project/src/runtime/exports/v2_reports_bundle_<timestamp>.zip`
 
-You can then transfer that single zip file with the same Magic Wormhole workflow used for the database.
-
 ## Current Known Limitations
 
-- this is still SQLite, not managed Postgres
+- still SQLite, not managed Postgres
 - matching and signals are still not automatically refreshed after every live sync
-- reports live on the Render disk and are not yet exposed through a user-facing web UI
+- the dashboard is still built into the same service as the background loop
+- the current frontend shell is transitional and demo-user-centered
 
 ## Recommended Next Cleanup
 
-When ready, the next cleanup milestone is:
+When ready, the next cleanup milestones are:
 
-1. merge this deployment setup into `main`
+1. keep the Render runtime stable on `main`
 2. keep the runtime DB at the normal name `agent_v2.db`
-3. use the report packaging helper when you want to retrieve report files
-4. later migrate to Postgres when the codebase is ready
+3. expand the thin API rather than adding more file-first UI logic
+4. later split the product shell from background work when the frontend grows
+5. only then plan Postgres migration
