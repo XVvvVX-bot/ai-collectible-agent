@@ -2,9 +2,31 @@
 
 ## Purpose
 
-This runbook is for developers operating the current V2 build on a local Windows machine.
+This runbook is for developers operating the current V2 build.
+
+There are now two practical operating contexts:
+
+- current Render web runtime
+- legacy local Windows runtime
 
 Read `V2_CURRENT_STATUS.md` before using this runbook if you are new to the project.
+
+## Current Primary Runtime
+
+The current simplest always-on deployment is the Render web service documented in `V2_RENDER_DEPLOYMENT.md`.
+
+That runtime now serves:
+
+- dashboard
+- report browser
+- thin API
+- background incremental and daily-cycle loops
+
+Use this runbook mainly for:
+
+- local developer operation
+- debugging background behavior
+- understanding lock/state/report mechanics
 
 ## Required Local Files
 
@@ -82,6 +104,22 @@ The daily report tasks:
 - use a once-per-local-day guard via `data/state/*.json`
 - generate markdown reports under `reports_v2`
 - do not mutate sync watermark state
+
+## Current Render Runtime Behavior
+
+The current Render service:
+
+- keeps runtime files under `/opt/render/project/src/runtime`
+- uses `runtime/data/agent_v2.db`
+- serves the dashboard and API
+- runs the same incremental and daily-cycle logic inside a background thread
+
+Useful Render checks now include:
+
+- service startup logs
+- `/healthz`
+- `/api/users/demo_u_v2_curated/profile`
+- `/api/users/demo_u_v2_curated/reports`
 
 ## Commands
 
@@ -271,6 +309,7 @@ It does not mean:
 1. check scheduler status
 2. check latest `zhaoonline_live` run
 3. inspect log file if needed
+4. if using the Render runtime, verify dashboard/API health
 4. if reviewing matching quality:
    - reseed demo user if needed
    - rerun matching

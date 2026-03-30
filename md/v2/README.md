@@ -13,7 +13,8 @@ Recommended reading order:
 7. [V2_OPERATIONS_RUNBOOK.md](./V2_OPERATIONS_RUNBOOK.md)
 8. [V2_USER_PROFILE_MODEL.md](./V2_USER_PROFILE_MODEL.md)
 9. [V2_DAILY_EVALUATION_CHECKLIST.md](./V2_DAILY_EVALUATION_CHECKLIST.md)
-10. [V2_RENDER_DEPLOYMENT.md](./V2_RENDER_DEPLOYMENT.md)
+10. [V2_DASHBOARD_AND_API.md](./V2_DASHBOARD_AND_API.md)
+11. [V2_RENDER_DEPLOYMENT.md](./V2_RENDER_DEPLOYMENT.md)
 
 ## What V2 Covers Today
 
@@ -26,7 +27,9 @@ Recommended reading order:
 - V2 profile model
 - V2 matching on top of interest targets
 - signal review and digest reporting
-- Windows scheduled polling and daily review/report setup
+- Render-hosted dashboard/report/API runtime
+- thin HTTP API for current product surfaces
+- Windows scheduled polling and daily review/report setup for legacy local operation
 
 ## Important Limitation
 
@@ -48,4 +51,5 @@ If you are new to the repo:
 
 1. read `V2_DEVELOPER_QUICKSTART.md`
 2. read `V2_CURRENT_STATUS.md`
-3. use `V2_OPERATIONS_RUNBOOK.md` before touching the live scheduler
+3. read `V2_DASHBOARD_AND_API.md`
+4. use `V2_OPERATIONS_RUNBOOK.md` before touching the live scheduler

@@ -20,9 +20,18 @@ V2 is the active build track and already has:
 - V2 interest-profile model
 - V2 matching against `user_interests_v2` / `user_interest_targets_v2`
 - V2 signal review and digest reporting
-- Windows Task Scheduler integration for live incremental polling and daily review/reporting
+- a Render-hosted web runtime that serves the current collector dashboard and report browser
+- a thin V2 HTTP API for profile, report, digest, matching, and signal actions
+- Windows Task Scheduler integration for legacy local live incremental polling and daily review/reporting
 
 V2 is not a finished replacement yet. The most important current gap is that live scheduled incremental sync still does not run automatic matching refresh or signal generation. The daily report tasks summarize current V2 state, but they do not generate new matches or signals by themselves.
+
+The current live cloud shape is:
+
+- one Render web service
+- one Render persistent disk
+- one SQLite database file on that disk
+- one combined process that runs the background sync/review loop and serves HTTP routes
 
 ## Repository Layout
 
@@ -61,6 +70,8 @@ F:\AI Agent
 - [V2 Operations Runbook](./md/v2/V2_OPERATIONS_RUNBOOK.md)
 - [V2 Matching Status](./md/v2/V2_MATCHING_STATUS.md)
 - [V2 User Profile Model](./md/v2/V2_USER_PROFILE_MODEL.md)
+- [V2 Dashboard And API](./md/v2/V2_DASHBOARD_AND_API.md)
+- [V2 Render Deployment](./md/v2/V2_RENDER_DEPLOYMENT.md)
 
 ## V2 Main Scripts
 
@@ -87,6 +98,12 @@ Build a V2 match audit report:
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts_v2\reporting\run_zhaoonline_v2_match_audit.py --db-path data/agent_v2.db
+```
+
+Run the combined V2 report service / dashboard locally:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts_v2\orchestration\run_v2_report_service.py --runtime-root runtime --timezone Asia/Shanghai
 ```
 
 Register the Windows scheduled live incremental task:
@@ -174,6 +191,19 @@ python .\scripts\orchestration\report_pipeline_health.py --db-path data/agent.db
 - daily signal-review log: `data/logs/v2_daily_signal_review.log`
 - daily digest log: `data/logs/v2_daily_interest_digest.log`
 
+## Current Product Surface
+
+The current live V2 service exposes:
+
+- collector dashboard at `/`
+- health endpoint at `/healthz`
+- report listing at `/api/reports`
+- user profile API at `/api/users/{user_id}/profile`
+- user report listing API at `/api/users/{user_id}/reports`
+- latest digest API at `/api/users/{user_id}/digest/latest`
+- matching action API at `/api/users/{user_id}/matching/run`
+- signal action API at `/api/users/{user_id}/signals/run`
+
 ## Tests
 
 Run the focused V2 tests:
@@ -181,26 +211,3 @@ Run the focused V2 tests:
 ```powershell
 .\.venv\Scripts\pytest.exe -q tests\test_v2_demo_user_seed.py tests\test_v2_interest_matching.py tests\test_v2_interest_profile_migration.py tests\test_v2_live_incremental.py tests\test_v2_matching_strictness.py
 ```
-
-- project docs initialized
-- source-agnostic V1 schema drafted
-- initial SQL migration added
-- Zhaoonline diagnostic tooling added
-- raw ingestion + normalization + taxonomy bootstrap + quality checks implemented
-- user domain services implemented for deterministic upsert and lifecycle control
-
-- Do not commit real secrets.
-- Keep the Zhaoonline secret outside source control.
-- Use the local ignored path `data/secrets/zhaoonline_secret.txt` or environment variables.
-
-1. Build CSV/Excel intake on top of `UserDomainService`.
-2. Build matching engine and rule-based signal generation.
-
-Read these in order:
-1. [V2 Developer Quickstart](./md/v2/V2_DEVELOPER_QUICKSTART.md)
-2. [V2 Current Status](./md/v2/V2_CURRENT_STATUS.md)
-3. [V2 Architecture](./md/v2/V2_ARCHITECTURE.md)
-4. [V2 Data Model](./md/v2/V2_DATA_MODEL.md)
-5. [V2 Runtime Workflow](./md/v2/V2_RUNTIME_WORKFLOW.md)
-6. [V2 Matching Status](./md/v2/V2_MATCHING_STATUS.md)
-7. [V2 Operations Runbook](./md/v2/V2_OPERATIONS_RUNBOOK.md)
