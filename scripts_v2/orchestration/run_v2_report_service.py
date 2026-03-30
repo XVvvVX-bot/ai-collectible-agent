@@ -7,6 +7,7 @@ import argparse
 import html
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from http import HTTPStatus
@@ -22,6 +23,14 @@ if str(SRC_DIR) not in sys.path:
 
 from ai_agent_v2.ingestion.live_incremental import DEFAULT_STATE_SOURCE_KEY
 from ai_agent_v2.runtime_host import BackgroundServiceRunner, DEFAULT_BASE_URL, build_service_config, emit_json
+
+REPORT_PATTERNS = (
+    ("interest_digest_user", "Interest Digest", "Collector digest", r"^v2_interest_digest_(.+)_(\d{8}T\d{6}\+\d{4})\.md$"),
+    ("interest_digest_index", "Interest Digest Index", "Daily index", r"^v2_daily_interest_digest_index_(\d{8}T\d{6}\+\d{4})\.md$"),
+    ("signal_review_user", "Signal Review", "Collector signals", r"^v2_signal_review_(.+)_(\d{8}T\d{6}\+\d{4})\.md$"),
+    ("signal_review_index", "Signal Review Index", "Daily index", r"^v2_daily_signal_review_index_(\d{8}T\d{6}\+\d{4})\.md$"),
+    ("user_base_review", "User Base Review", "Daily summary", r"^v2_daily_user_base_review_(\d{8}T\d{6}\+\d{4})\.md$"),
+)
 
 
 def main() -> int:
@@ -89,7 +98,7 @@ def main() -> int:
         host=args.host,
         port=args.port,
         runtime=runner.start_event()["runtime"],
-        routes=["/", "/healthz", "/api/reports", "/reports/<name>", "/raw/<name>", "/downloads/<name>"],
+        routes=["/", "/healthz", "/api/reports", "/latest/<kind>", "/reports/<name>", "/raw/<name>", "/downloads/<name>"],
     )
     try:
         server.serve_forever()
@@ -115,6 +124,16 @@ def build_handler(*, runtime_root: Path, reports_dir: Path):
                 return
             if path == "/":
                 self._write_html(HTTPStatus.OK, render_index_html(reports_dir=reports_dir, exports_dir=exports_dir))
+                return
+            if path.startswith("/latest/"):
+                report_kind = unquote(path.removeprefix("/latest/"))
+                target = latest_report_for_kind(reports_dir, report_kind)
+                if target is None:
+                    self._write_html(HTTPStatus.NOT_FOUND, render_error_html("Latest report not found"))
+                    return
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", f"/reports/{quote(target.name)}")
+                self.end_headers()
                 return
             if path.startswith("/reports/"):
                 name = unquote(path.removeprefix("/reports/"))
@@ -180,11 +199,16 @@ def report_entries(reports_dir: Path) -> list[dict[str, object]]:
     entries = []
     for path in sorted(reports_dir.glob("*.md"), key=lambda item: item.stat().st_mtime, reverse=True):
         stat = path.stat()
+        metadata = classify_report(path.name)
         entries.append(
             {
                 "name": path.name,
                 "size_bytes": stat.st_size,
                 "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "kind": metadata["kind"],
+                "label": metadata["label"],
+                "scope": metadata["scope"],
+                "timestamp_label": metadata["timestamp_label"],
             }
         )
     return entries
@@ -206,6 +230,59 @@ def bundle_entries(exports_dir: Path) -> list[dict[str, object]]:
     return entries
 
 
+def classify_report(name: str) -> dict[str, str]:
+    for kind, label, scope, pattern in REPORT_PATTERNS:
+        match = re.match(pattern, name)
+        if not match:
+            continue
+        groups = match.groups()
+        user_id = groups[0] if len(groups) == 2 else None
+        timestamp_token = groups[-1]
+        metadata = {
+            "kind": kind,
+            "label": label,
+            "scope": scope,
+            "timestamp_label": format_report_timestamp(timestamp_token),
+            "user_id": user_id or "",
+        }
+        if user_id:
+            metadata["scope"] = f"Collector: {user_id}"
+        return metadata
+    return {
+        "kind": "other",
+        "label": "Report",
+        "scope": "Unclassified",
+        "timestamp_label": "Unknown time",
+        "user_id": "",
+    }
+
+
+def format_report_timestamp(token: str) -> str:
+    try:
+        parsed = datetime.strptime(token, "%Y%m%dT%H%M%S%z")
+    except ValueError:
+        return token
+    return parsed.strftime("%b %d, %Y %H:%M %Z")
+
+
+def latest_report_for_kind(reports_dir: Path, report_kind: str) -> Path | None:
+    for item in report_entries(reports_dir):
+        if item["kind"] == report_kind:
+            return reports_dir / str(item["name"])
+    return None
+
+
+def format_size(num_bytes: int) -> str:
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{int(num_bytes)} B"
+
+
 def safe_child(parent: Path, name: str) -> Path | None:
     candidate = (parent / name).resolve()
     try:
@@ -218,21 +295,31 @@ def safe_child(parent: Path, name: str) -> Path | None:
 def render_index_html(*, reports_dir: Path, exports_dir: Path) -> str:
     reports = report_entries(reports_dir)
     bundles = bundle_entries(exports_dir)
-    report_items = "\n".join(
-        (
-            f'<li><a href="/reports/{quote(item["name"])}">{html.escape(str(item["name"]))}</a> '
-            f'(<a href="/raw/{quote(item["name"])}">raw</a>) '
-            f'<span>{html.escape(str(item["modified_at"]))}</span></li>'
+    latest_kinds = [
+        ("interest_digest_user", "Latest collector digest"),
+        ("signal_review_user", "Latest collector signal review"),
+        ("user_base_review", "Latest daily base review"),
+        ("interest_digest_index", "Latest digest index"),
+        ("signal_review_index", "Latest signal index"),
+    ]
+    latest_cards = []
+    for kind, heading in latest_kinds:
+        item = next((entry for entry in reports if entry["kind"] == kind), None)
+        if item is None:
+            continue
+        latest_cards.append(
+            f"""
+            <a class="latest-card" href="/reports/{quote(str(item["name"]))}">
+              <span class="eyebrow">{html.escape(heading)}</span>
+              <strong>{html.escape(str(item["label"]))}</strong>
+              <span>{html.escape(str(item["scope"]))}</span>
+              <span class="meta">{html.escape(str(item["timestamp_label"]))}</span>
+            </a>
+            """
         )
-        for item in reports
-    ) or "<li>No reports found.</li>"
-    bundle_items = "\n".join(
-        (
-            f'<li><a href="/downloads/{quote(item["name"])}">{html.escape(str(item["name"]))}</a> '
-            f'<span>{html.escape(str(item["modified_at"]))}</span></li>'
-        )
-        for item in bundles
-    ) or "<li>No bundles found yet.</li>"
+    latest_cards_html = "\n".join(latest_cards) or '<p class="empty-state">No reports generated yet.</p>'
+    report_rows = "\n".join(render_report_row(item) for item in reports) or '<p class="empty-state">No reports found yet.</p>'
+    bundle_rows = "\n".join(render_bundle_row(item) for item in bundles) or '<p class="empty-state">No bundles found yet.</p>'
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -240,39 +327,323 @@ def render_index_html(*, reports_dir: Path, exports_dir: Path) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI Agent V2 Reports</title>
   <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f7f5ef; color: #222; }}
-    main {{ max-width: 980px; margin: 0 auto; padding: 32px 20px 48px; }}
-    h1, h2 {{ margin-bottom: 12px; }}
-    .card {{ background: #fffdf8; border: 1px solid #e8dfcf; border-radius: 16px; padding: 20px; margin-bottom: 20px; }}
-    a {{ color: #8a3b12; text-decoration: none; }}
+    :root {{
+      --bg: #f4efe6;
+      --panel: rgba(255, 250, 243, 0.86);
+      --panel-strong: #fffaf1;
+      --border: #dfcfb5;
+      --ink: #1f2228;
+      --muted: #6d6255;
+      --accent: #8d3a12;
+      --accent-soft: #efe0cf;
+      --shadow: 0 24px 60px rgba(97, 67, 33, 0.08);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(181, 118, 52, 0.15), transparent 28%),
+        radial-gradient(circle at top right, rgba(110, 78, 45, 0.1), transparent 26%),
+        linear-gradient(180deg, #f7f1e8 0%, var(--bg) 100%);
+    }}
+    main {{ max-width: 1120px; margin: 0 auto; padding: 36px 20px 60px; }}
+    h1, h2, h3 {{ margin: 0 0 12px; }}
+    .hero {{
+      background: linear-gradient(135deg, rgba(255, 248, 237, 0.96), rgba(247, 232, 212, 0.88));
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 28px;
+      box-shadow: var(--shadow);
+      margin-bottom: 24px;
+    }}
+    .hero h1 {{
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2.3rem, 4vw, 3.6rem);
+      letter-spacing: -0.04em;
+    }}
+    .hero p {{
+      color: var(--muted);
+      max-width: 760px;
+      font-size: 1.08rem;
+      line-height: 1.6;
+    }}
+    .chip-row {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }}
+    .chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 9px 14px;
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.96rem;
+    }}
+    .grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+      margin-bottom: 24px;
+    }}
+    .latest-card {{
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 18px;
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      min-height: 148px;
+    }}
+    .eyebrow {{
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      font-size: 0.75rem;
+      color: var(--muted);
+    }}
+    .latest-card strong {{ font-size: 1.1rem; line-height: 1.3; }}
+    .latest-card .meta {{ margin-top: auto; color: var(--muted); font-size: 0.92rem; }}
+    .section {{
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 24px;
+      margin-bottom: 22px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+    }}
+    .section-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 18px;
+    }}
+    .section-header p {{ margin: 0; color: var(--muted); }}
+    .report-list, .bundle-list {{
+      display: grid;
+      gap: 12px;
+    }}
+    .report-row, .bundle-row {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 16px 18px;
+    }}
+    .report-row h3, .bundle-row h3 {{ margin: 0 0 6px; font-size: 1.05rem; }}
+    .report-row p, .bundle-row p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
+    .meta-stack {{
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }}
+    .meta-stack .link-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: flex-end;
+    }}
+    .pill {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.82rem;
+      font-weight: 600;
+    }}
+    a {{ color: var(--accent); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
-    li {{ margin: 8px 0; }}
-    span {{ color: #666; font-size: 0.92rem; }}
-    code {{ background: #f0eadc; padding: 2px 6px; border-radius: 6px; }}
+    code {{
+      font-family: "JetBrains Mono", "Cascadia Code", monospace;
+      background: #efe4d4;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }}
+    .empty-state {{ color: var(--muted); margin: 0; }}
+    @media (max-width: 720px) {{
+      .report-row, .bundle-row {{
+        grid-template-columns: 1fr;
+      }}
+      .meta-stack {{
+        align-items: flex-start;
+      }}
+      .meta-stack .link-row {{
+        justify-content: flex-start;
+      }}
+    }}
   </style>
 </head>
 <body>
   <main>
-    <h1>AI Agent V2 Reports</h1>
-    <div class="card">
-      <p>Browse the markdown reports generated on the Render runtime disk.</p>
-      <p>Health endpoint: <a href="/healthz"><code>/healthz</code></a> | JSON listing: <a href="/api/reports"><code>/api/reports</code></a></p>
-    </div>
-    <div class="card">
-      <h2>Reports</h2>
-      <ul>{report_items}</ul>
-    </div>
-    <div class="card">
-      <h2>Bundles</h2>
-      <ul>{bundle_items}</ul>
-    </div>
+    <section class="hero">
+      <h1>AI Agent V2 Reports</h1>
+      <p>Browse the daily review, signal, and digest reports generated on the Render runtime disk. This page stays attached to the same always-on service that performs incremental sync and scheduled review cycles.</p>
+      <div class="chip-row">
+        <span class="chip">{len(reports)} report files</span>
+        <span class="chip">{len(bundles)} bundles</span>
+        <span class="chip">Health: <a href="/healthz"><code>/healthz</code></a></span>
+        <span class="chip">JSON: <a href="/api/reports"><code>/api/reports</code></a></span>
+      </div>
+    </section>
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>Latest Shortcuts</h2>
+          <p>Fast paths into the newest reports by report type.</p>
+        </div>
+      </div>
+      <div class="grid">{latest_cards_html}</div>
+    </section>
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>Reports</h2>
+          <p>Newest markdown reports first, with direct rendered and raw links.</p>
+        </div>
+      </div>
+      <div class="report-list">{report_rows}</div>
+    </section>
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>Bundles</h2>
+          <p>Zip exports you can download directly when you package reports on the server.</p>
+        </div>
+      </div>
+      <div class="bundle-list">{bundle_rows}</div>
+    </section>
   </main>
 </body>
 </html>"""
 
 
+def render_report_row(item: dict[str, object]) -> str:
+    return f"""
+    <article class="report-row">
+      <div>
+        <span class="pill">{html.escape(str(item["label"]))}</span>
+        <h3><a href="/reports/{quote(str(item["name"]))}">{html.escape(str(item["name"]))}</a></h3>
+        <p>{html.escape(str(item["scope"]))}</p>
+      </div>
+      <div class="meta-stack">
+        <span>{html.escape(str(item["timestamp_label"]))}</span>
+        <span>{format_size(int(item["size_bytes"]))}</span>
+        <div class="link-row">
+          <a href="/reports/{quote(str(item["name"]))}">Open</a>
+          <a href="/raw/{quote(str(item["name"]))}">Raw</a>
+          <a href="/latest/{quote(str(item["kind"]))}">Latest of type</a>
+        </div>
+      </div>
+    </article>
+    """
+
+
+def render_bundle_row(item: dict[str, object]) -> str:
+    return f"""
+    <article class="bundle-row">
+      <div>
+        <span class="pill">Bundle</span>
+        <h3><a href="/downloads/{quote(str(item["name"]))}">{html.escape(str(item["name"]))}</a></h3>
+        <p>Packaged report export for offline download.</p>
+      </div>
+      <div class="meta-stack">
+        <span>{html.escape(str(item["modified_at"]))}</span>
+        <span>{format_size(int(item["size_bytes"]))}</span>
+        <div class="link-row">
+          <a href="/downloads/{quote(str(item["name"]))}">Download</a>
+        </div>
+      </div>
+    </article>
+    """
+
+
+def render_markdown_html(text: str) -> str:
+    lines = text.splitlines()
+    blocks: list[str] = []
+    paragraph_lines: list[str] = []
+    list_items: list[str] = []
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph_lines
+        if paragraph_lines:
+            joined = " ".join(line.strip() for line in paragraph_lines if line.strip())
+            blocks.append(f"<p>{render_inline_markdown(joined)}</p>")
+            paragraph_lines = []
+
+    def flush_list() -> None:
+        nonlocal list_items
+        if list_items:
+            items_html = "".join(f"<li>{render_inline_markdown(item)}</li>" for item in list_items)
+            blocks.append(f"<ul>{items_html}</ul>")
+            list_items = []
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            flush_paragraph()
+            flush_list()
+            continue
+        if stripped == "---":
+            flush_paragraph()
+            flush_list()
+            blocks.append("<hr>")
+            continue
+        if stripped.startswith("### "):
+            flush_paragraph()
+            flush_list()
+            blocks.append(f"<h3>{render_inline_markdown(stripped[4:])}</h3>")
+            continue
+        if stripped.startswith("## "):
+            flush_paragraph()
+            flush_list()
+            blocks.append(f"<h2>{render_inline_markdown(stripped[3:])}</h2>")
+            continue
+        if stripped.startswith("# "):
+            flush_paragraph()
+            flush_list()
+            blocks.append(f"<h1>{render_inline_markdown(stripped[2:])}</h1>")
+            continue
+        if stripped.startswith("- "):
+            flush_paragraph()
+            list_items.append(stripped[2:])
+            continue
+        if line.startswith("    ") or line.startswith("\t"):
+            flush_paragraph()
+            flush_list()
+            blocks.append(f"<pre><code>{html.escape(line.lstrip())}</code></pre>")
+            continue
+        paragraph_lines.append(stripped)
+
+    flush_paragraph()
+    flush_list()
+    return "\n".join(blocks)
+
+
+def render_inline_markdown(text: str) -> str:
+    escaped = html.escape(text)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+    escaped = re.sub(r"\[(.+?)\]\((.+?)\)", r'<a href="\2">\1</a>', escaped)
+    return escaped
+
+
 def render_report_html(path: Path) -> str:
-    content = html.escape(path.read_text(encoding="utf-8"))
+    rendered = render_markdown_html(path.read_text(encoding="utf-8"))
+    metadata = classify_report(path.name)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -280,18 +651,127 @@ def render_report_html(path: Path) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(path.name)}</title>
   <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #fcfbf7; color: #222; }}
-    main {{ max-width: 980px; margin: 0 auto; padding: 24px 20px 40px; }}
-    a {{ color: #8a3b12; text-decoration: none; }}
+    :root {{
+      --bg: #f4efe6;
+      --panel: rgba(255, 250, 243, 0.92);
+      --border: #dfcfb5;
+      --ink: #21242a;
+      --muted: #675d52;
+      --accent: #8d3a12;
+      --shadow: 0 24px 60px rgba(97, 67, 33, 0.08);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(181, 118, 52, 0.13), transparent 30%),
+        linear-gradient(180deg, #f7f2ea 0%, var(--bg) 100%);
+    }}
+    main {{ max-width: 980px; margin: 0 auto; padding: 30px 20px 60px; }}
+    .topbar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 18px;
+      color: var(--muted);
+    }}
+    a {{ color: var(--accent); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
-    pre {{ white-space: pre-wrap; word-wrap: break-word; background: #fffdf8; border: 1px solid #e8dfcf; border-radius: 16px; padding: 20px; overflow-x: auto; }}
+    .hero {{
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 24px;
+      box-shadow: var(--shadow);
+      margin-bottom: 20px;
+    }}
+    .hero h1 {{
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2rem, 3.6vw, 3rem);
+      margin: 8px 0 10px;
+      letter-spacing: -0.04em;
+    }}
+    .eyebrow {{
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      font-size: 0.78rem;
+    }}
+    .meta {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }}
+    .meta span {{
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: #fff9ef;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }}
+    .content {{
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 26px;
+      box-shadow: var(--shadow);
+    }}
+    .content h1, .content h2, .content h3 {{
+      font-family: Georgia, "Times New Roman", serif;
+      line-height: 1.15;
+      margin: 1.4em 0 0.55em;
+    }}
+    .content h1:first-child {{ margin-top: 0; }}
+    .content p, .content li {{
+      line-height: 1.72;
+      font-size: 1.03rem;
+    }}
+    .content ul {{ padding-left: 1.3rem; }}
+    .content hr {{
+      border: 0;
+      border-top: 1px solid var(--border);
+      margin: 26px 0;
+    }}
+    code {{
+      font-family: "JetBrains Mono", "Cascadia Code", monospace;
+      background: #efe4d4;
+      padding: 0.1em 0.35em;
+      border-radius: 6px;
+      font-size: 0.92em;
+    }}
+    pre {{
+      white-space: pre-wrap;
+      overflow-x: auto;
+      background: #fff9ef;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 16px;
+    }}
   </style>
 </head>
 <body>
   <main>
-    <p><a href="/">Back to report index</a> | <a href="/raw/{quote(path.name)}">Raw markdown</a></p>
-    <h1>{html.escape(path.name)}</h1>
-    <pre>{content}</pre>
+    <div class="topbar">
+      <a href="/">Back to report index</a>
+      <span>|</span>
+      <a href="/raw/{quote(path.name)}">Raw markdown</a>
+    </div>
+    <section class="hero">
+      <span class="eyebrow">{html.escape(metadata["label"])}</span>
+      <h1>{html.escape(path.name)}</h1>
+      <div class="meta">
+        <span>{html.escape(metadata["scope"])}</span>
+        <span>{html.escape(metadata["timestamp_label"])}</span>
+      </div>
+    </section>
+    <section class="content">
+      {rendered}
+    </section>
   </main>
 </body>
 </html>"""
