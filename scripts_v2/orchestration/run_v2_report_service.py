@@ -2586,6 +2586,32 @@ def render_interest_create_html(
       font-weight: 600;
       border: 1px solid var(--border);
     }}
+    .preset-grid, .guide-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+      margin-top: 16px;
+    }}
+    .preset-card, .guide-card {{
+      background: #fffaf3;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 16px;
+      box-shadow: 0 14px 36px rgba(91, 58, 20, 0.07);
+    }}
+    .preset-card h3, .guide-card h3 {{
+      margin: 0 0 8px;
+      color: var(--accent-deep);
+      font-size: 1rem;
+    }}
+    .preset-card p, .guide-card p {{
+      margin: 0 0 10px;
+      font-size: 0.93rem;
+    }}
+    .preset-card button {{
+      width: 100%;
+      margin-top: 4px;
+    }}
     form {{
       display: grid;
       gap: 16px;
@@ -2600,6 +2626,11 @@ def render_interest_create_html(
       gap: 6px;
       color: var(--muted);
       font-size: 0.94rem;
+    }}
+    .field-help {{
+      font-size: 0.84rem;
+      color: var(--muted);
+      line-height: 1.5;
     }}
     input, select, textarea, button {{
       border: 1px solid var(--border);
@@ -2628,6 +2659,12 @@ def render_interest_create_html(
       padding: 2px 6px;
       border-radius: 6px;
     }}
+    .section-title {{
+      margin: 8px 0 4px;
+      font-weight: 700;
+      color: var(--accent-deep);
+      font-size: 1rem;
+    }}
     a {{ color: var(--accent); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
   </style>
@@ -2636,23 +2673,51 @@ def render_interest_create_html(
   <main>
     <section class="panel">
       <h1>Add Interest</h1>
-      <p>Create a new active interest, its first target, and its signal policy together. This is the missing browser-native entry point for manual curation.</p>
+      <p>Create a new active interest, its first target, and its signal policy together. Start with a preset if you want the form to pick sane defaults for the most common collector workflows.</p>
       <div class="chip-row">
         <span class="chip">User <code>{html.escape(str(user.get("id") or user_id))}</code></span>
         <span class="chip">Language <code>{html.escape(str(user.get("language") or "-"))}</code></span>
         <span class="chip">Timezone <code>{html.escape(str(user.get("timezone") or "-"))}</code></span>
       </div>
+      <div class="preset-grid">
+        <section class="preset-card">
+          <h3>Watch Buy</h3>
+          <p>For one exact item you want to buy quickly when it appears at a good level.</p>
+          <button type="button" onclick="applyInterestPreset('watch_buy_exact')">Use Watch Buy Preset</button>
+        </section>
+        <section class="preset-card">
+          <h3>Watch Sell</h3>
+          <p>For something you already hold and want exit signals when the market improves.</p>
+          <button type="button" onclick="applyInterestPreset('watch_sell_exit')">Use Watch Sell Preset</button>
+        </section>
+        <section class="preset-card">
+          <h3>Collecting</h3>
+          <p>For completing a set or family where related variants are still useful to see.</p>
+          <button type="button" onclick="applyInterestPreset('collecting_family')">Use Collecting Preset</button>
+        </section>
+        <section class="preset-card">
+          <h3>Discovery</h3>
+          <p>For broad market watching where you want a digest rather than immediate alerts.</p>
+          <button type="button" onclick="applyInterestPreset('discovery_series')">Use Discovery Preset</button>
+        </section>
+      </div>
     </section>
     <section class="panel">
       <form method="post" action="/interests/create">
         <input type="hidden" name="user_id" value="{html.escape(user_id)}">
+        <div class="section-title">Identity</div>
         <div class="grid">
           <label>Interest name
             <input type="text" name="interest_name" placeholder="e.g. 红楼梦型张补仓" required>
+            <span class="field-help">What you want this track to be called in the dashboard and reports.</span>
           </label>
           <label>Raw target input
             <input type="text" name="raw_input" placeholder="e.g. T69M红楼梦型张新" required>
+            <span class="field-help">Paste the exact listing-style title you care about. The service parses this into the target fields automatically.</span>
           </label>
+        </div>
+        <div class="section-title">Matching Setup</div>
+        <div class="grid">
           <label>Interest kind
             <select name="interest_kind">
               <option value="watch_buy">Watch buy</option>
@@ -2661,6 +2726,7 @@ def render_interest_create_html(
               <option value="discovery">Discovery</option>
               <option value="portfolio_monitor">Portfolio monitor</option>
             </select>
+            <span class="field-help">Pick the job this interest is doing: buying, selling, collecting, or broad discovery.</span>
           </label>
           <label>Scope
             <select name="scope_kind">
@@ -2670,6 +2736,7 @@ def render_interest_create_html(
               <option value="theme">Theme</option>
               <option value="keyword">Keyword</option>
             </select>
+            <span class="field-help">Narrow scopes are precise; broader scopes tolerate related material.</span>
           </label>
           <label>Precision
             <select name="precision_mode">
@@ -2677,6 +2744,7 @@ def render_interest_create_html(
               {render_select_option('balanced', default_precision_mode, 'Balanced')}
               {render_select_option('broad', default_precision_mode, 'Broad')}
             </select>
+            <span class="field-help">Exact is strict, balanced is practical, broad is discovery-oriented.</span>
           </label>
           <label>Priority
             <select name="interest_priority">
@@ -2684,9 +2752,11 @@ def render_interest_create_html(
               {render_select_option('normal', default_priority, 'Normal')}
               {render_select_option('low', default_priority, 'Low')}
             </select>
+            <span class="field-help">High-priority interests float to the top of the dashboard and reports.</span>
           </label>
           <label>Budget max
             <input type="number" step="0.01" name="budget_max" value="">
+            <span class="field-help">Optional. If you leave this blank, the market will be watched without a hard cap.</span>
           </label>
           <label>Condition mode
             <select name="condition_mode">
@@ -2694,32 +2764,119 @@ def render_interest_create_html(
               {render_select_option('prefer', default_condition_mode, 'Prefer')}
               {render_select_option('require', default_condition_mode, 'Require')}
             </select>
+            <span class="field-help">Use require if condition must match; prefer if it matters but should not fully block.</span>
           </label>
+        </div>
+        <div class="section-title">Signal Policy</div>
+        <div class="grid">
           <label>Delivery mode
             <select name="delivery_mode">
               {render_select_option('immediate', default_delivery_mode, 'Immediate')}
               {render_select_option('daily_digest', default_delivery_mode, 'Daily digest')}
               {render_select_option('silent_log', default_delivery_mode, 'Silent log')}
             </select>
+            <span class="field-help">Immediate for alert-like behavior, digest for review-friendly batching.</span>
           </label>
           <label>Cooldown hours
             <input type="number" min="1" max="168" name="cooldown_hours" value="{html.escape(str(default_cooldown))}">
+            <span class="field-help">How long the same signal should stay quiet before firing again.</span>
           </label>
           <label>Min match score
             <input type="number" step="0.1" name="min_match_score" value="{html.escape(str(default_min_match_score))}">
+            <span class="field-help">Higher scores are stricter and quieter. Lower scores increase coverage.</span>
           </label>
           <label>Max signals per day
             <input type="number" min="1" max="100" name="max_signals_per_day" value="8">
+            <span class="field-help">A simple cap to avoid flooding this one interest with too many alerts.</span>
           </label>
         </div>
+        <div class="section-title">Notes</div>
         <label>Operator notes
           <textarea name="interest_notes" placeholder="Why this interest exists, what matters, and any curation rules."></textarea>
+          <span class="field-help">These notes show up later on the interests page and help explain why this track exists.</span>
         </label>
         <button type="submit">Create interest</button>
       </form>
       <p><a href="/interests?user_id={quote(user_id)}">Back to interests</a></p>
     </section>
+    <section class="panel">
+      <div class="guide-grid">
+        <section class="guide-card">
+          <h3>Good raw input examples</h3>
+          <p><code>T69M红楼梦型张新</code>, <code>T43西游记新全</code>, <code>2026年中国龙31.104克普制银币</code></p>
+        </section>
+        <section class="guide-card">
+          <h3>When to use broad scope</h3>
+          <p>Use <strong>series</strong>, <strong>theme</strong>, or <strong>keyword</strong> only when you want discovery coverage rather than exact targeting.</p>
+        </section>
+        <section class="guide-card">
+          <h3>Fastest safe default</h3>
+          <p>If you are unsure, use <strong>Watch Buy</strong> + <strong>Exact Item</strong> + <strong>Balanced</strong> and then refine after you see the first results.</p>
+        </section>
+      </div>
+    </section>
   </main>
+  <script>
+    const presetDefinitions = {{
+      watch_buy_exact: {{
+        interest_kind: "watch_buy",
+        scope_kind: "exact_item",
+        precision_mode: "exact",
+        interest_priority: "high",
+        condition_mode: "require",
+        delivery_mode: "immediate",
+        cooldown_hours: "6",
+        min_match_score: "90",
+        max_signals_per_day: "6",
+      }},
+      watch_sell_exit: {{
+        interest_kind: "watch_sell",
+        scope_kind: "exact_item",
+        precision_mode: "exact",
+        interest_priority: "high",
+        condition_mode: "require",
+        delivery_mode: "immediate",
+        cooldown_hours: "12",
+        min_match_score: "88",
+        max_signals_per_day: "4",
+      }},
+      collecting_family: {{
+        interest_kind: "collecting",
+        scope_kind: "issue_family",
+        precision_mode: "balanced",
+        interest_priority: "high",
+        condition_mode: "prefer",
+        delivery_mode: "daily_digest",
+        cooldown_hours: "12",
+        min_match_score: "74",
+        max_signals_per_day: "8",
+      }},
+      discovery_series: {{
+        interest_kind: "discovery",
+        scope_kind: "series",
+        precision_mode: "broad",
+        interest_priority: "normal",
+        condition_mode: "ignore",
+        delivery_mode: "daily_digest",
+        cooldown_hours: "24",
+        min_match_score: "58",
+        max_signals_per_day: "20",
+      }},
+    }};
+
+    function applyInterestPreset(name) {{
+      const preset = presetDefinitions[name];
+      if (!preset) {{
+        return;
+      }}
+      for (const [fieldName, value] of Object.entries(preset)) {{
+        const field = document.querySelector(`[name="${{fieldName}}"]`);
+        if (field) {{
+          field.value = value;
+        }}
+      }}
+    }}
+  </script>
 </body>
 </html>"""
 
