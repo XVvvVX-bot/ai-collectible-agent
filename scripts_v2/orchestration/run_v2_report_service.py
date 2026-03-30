@@ -38,6 +38,7 @@ REPORT_PATTERNS = (
     ("user_base_review", "User Base Review", "Daily summary", r"^v2_daily_user_base_review_(\d{8}T\d{6}\+\d{4})\.md$"),
 )
 DEFAULT_DASHBOARD_USER_ID = os.getenv("APP_DEFAULT_USER_ID") or "demo_u_v2_curated"
+DEFAULT_INTEREST_REFRESH_LOOKBACK_HOURS = int(os.getenv("APP_DAILY_LOOKBACK_HOURS", "24"))
 
 
 def main() -> int:
@@ -1044,6 +1045,11 @@ def create_interest_form(
         max_signals_per_day=max_signals_per_day,
     )
     interest_id = str(created_record["interest_id"])
+    refresh_payload = run_interest_refresh_payload(
+        db_path,
+        user_id=user_id,
+        lookback_hours=DEFAULT_INTEREST_REFRESH_LOOKBACK_HOURS,
+    )
     created = load_interest_editor_payload(db_path, user_id=user_id, interest_id=interest_id)
     return {
         "ok": True,
@@ -1051,6 +1057,7 @@ def create_interest_form(
         "user": created["user"],
         "interest": created["interest"],
         "target_id": created_record["target_id"],
+        "refresh": refresh_payload,
     }
 
 
@@ -1159,12 +1166,18 @@ def save_interest_form(
         )
         conn.commit()
 
+    refresh_payload = run_interest_refresh_payload(
+        db_path,
+        user_id=user_id,
+        lookback_hours=DEFAULT_INTEREST_REFRESH_LOOKBACK_HOURS,
+    )
     updated = load_interest_editor_payload(db_path, user_id=user_id, interest_id=interest_id)
     return {
         "ok": True,
         "updated_at": now_iso,
         "user": updated["user"],
         "interest": updated["interest"],
+        "refresh": refresh_payload,
     }
 
 
@@ -1179,6 +1192,11 @@ def delete_interest_form(
         user_id=user_id,
         interest_id=interest_id,
     )
+    refresh_payload = run_interest_refresh_payload(
+        db_path,
+        user_id=user_id,
+        lookback_hours=DEFAULT_INTEREST_REFRESH_LOOKBACK_HOURS,
+    )
     refreshed = load_user_interests_payload(db_path, user_id=user_id)
     return {
         "ok": True,
@@ -1186,6 +1204,7 @@ def delete_interest_form(
         "user": refreshed["user"],
         "summary": refreshed["summary"],
         "interest": deleted_record["interest"],
+        "refresh": refresh_payload,
     }
 
 
@@ -1604,6 +1623,18 @@ def run_digest_payload(
             "rendered": f"/reports/{quote(report_path.name)}",
             "raw": f"/raw/{quote(report_path.name)}",
         },
+    }
+
+
+def run_interest_refresh_payload(db_path: Path, *, user_id: str, lookback_hours: int) -> dict[str, object]:
+    matching_payload = run_matching_payload(db_path, user_id=user_id, only_active_listings=True)
+    signals_payload = run_signals_payload(db_path, user_id=user_id, lookback_hours=lookback_hours)
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "lookback_hours": lookback_hours,
+        "matching": matching_payload,
+        "signals": signals_payload,
     }
 
 
@@ -2701,6 +2732,7 @@ def render_interest_save_result_html(
 ) -> str:
     interest = payload.get("interest") if isinstance(payload.get("interest"), dict) else {}
     summary = interest.get("summary") if isinstance(interest.get("summary"), dict) else {}
+    refresh = payload.get("refresh") if isinstance(payload.get("refresh"), dict) else {}
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -2752,6 +2784,7 @@ def render_interest_save_result_html(
       <h1>Interest Saved</h1>
       <p><code>{html.escape(str(interest.get("interest_name") or interest_id))}</code> was updated successfully.</p>
       <p>Signals <strong>{html.escape(str(summary.get("active_signal_count") or 0))}</strong> | matches <strong>{html.escape(str(summary.get("active_match_count") or 0))}</strong> | updated at <code>{html.escape(str(payload.get("updated_at") or "-"))}</code></p>
+      {render_interest_refresh_summary(refresh, user_id=user_id)}
       <div class="link-row">
         <a href="/interests/edit?user_id={quote(user_id)}&interest_id={quote(interest_id)}">Keep editing</a>
         <a href="/interests?user_id={quote(user_id)}">Back to interests</a>
@@ -2771,6 +2804,7 @@ def render_interest_create_result_html(
     interest = payload.get("interest") if isinstance(payload.get("interest"), dict) else {}
     summary = interest.get("summary") if isinstance(interest.get("summary"), dict) else {}
     interest_id = str(interest.get("id") or "")
+    refresh = payload.get("refresh") if isinstance(payload.get("refresh"), dict) else {}
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -2822,7 +2856,8 @@ def render_interest_create_result_html(
       <h1>Interest Created</h1>
       <p><code>{html.escape(str(interest.get("interest_name") or interest_id))}</code> was created successfully.</p>
       <p>Signals <strong>{html.escape(str(summary.get("active_signal_count") or 0))}</strong> | matches <strong>{html.escape(str(summary.get("active_match_count") or 0))}</strong> | created at <code>{html.escape(str(payload.get("created_at") or "-"))}</code></p>
-      <p>The new interest is active immediately. If you want fresh matches or signals right away, use the action tools next.</p>
+      <p>The new interest is active immediately, and the service already refreshed matching + signals for this user.</p>
+      {render_interest_refresh_summary(refresh, user_id=user_id)}
       <div class="link-row">
         <a href="/interests/edit?user_id={quote(user_id)}&interest_id={quote(interest_id)}">Edit this interest</a>
         <a href="/actions?user_id={quote(user_id)}">Open actions</a>
@@ -2842,6 +2877,7 @@ def render_interest_delete_result_html(
 ) -> str:
     interest = payload.get("interest") if isinstance(payload.get("interest"), dict) else {}
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    refresh = payload.get("refresh") if isinstance(payload.get("refresh"), dict) else {}
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -2894,6 +2930,7 @@ def render_interest_delete_result_html(
       <p><code>{html.escape(str(interest.get("interest_name") or "-"))}</code> was moved out of the active set.</p>
       <p>The linked target was deactivated, and any active matches/signals attached to it were marked inactive so the dashboard stays honest.</p>
       <p>Remaining active interests <strong>{html.escape(str(summary.get("active_interest_count") or 0))}</strong> | active targets <strong>{html.escape(str(summary.get("active_target_count") or 0))}</strong> | removed at <code>{html.escape(str(payload.get("deleted_at") or "-"))}</code></p>
+      {render_interest_refresh_summary(refresh, user_id=user_id)}
       <div class="link-row">
         <a href="/interests/new?user_id={quote(user_id)}">Add another interest</a>
         <a href="/interests?user_id={quote(user_id)}">Back to interests</a>
@@ -2903,6 +2940,24 @@ def render_interest_delete_result_html(
   </main>
 </body>
 </html>"""
+
+
+def render_interest_refresh_summary(refresh: dict[str, object], *, user_id: str) -> str:
+    matching = refresh.get("matching") if isinstance(refresh.get("matching"), dict) else {}
+    signals = refresh.get("signals") if isinstance(refresh.get("signals"), dict) else {}
+    matching_result = matching.get("result") if isinstance(matching.get("result"), dict) else {}
+    signals_result = signals.get("result") if isinstance(signals.get("result"), dict) else {}
+    return f"""
+      <p>Auto refresh completed: matches upserted <strong>{html.escape(str(matching_result.get("matches_upserted") or 0))}</strong> |
+      signals inserted <strong>{html.escape(str(signals_result.get("inserted") or 0))}</strong> |
+      signals updated <strong>{html.escape(str(signals_result.get("updated") or 0))}</strong> |
+      signals deactivated <strong>{html.escape(str(signals_result.get("deactivated") or 0))}</strong>.</p>
+      <div class="link-row">
+        <a href="/matches?user_id={quote(user_id)}">Open opportunities</a>
+        <a href="/api/users/{quote(user_id)}/signals">Signals JSON</a>
+        <a href="/api/users/{quote(user_id)}/matches">Matches JSON</a>
+      </div>
+    """
 
 
 def render_dashboard_html(
