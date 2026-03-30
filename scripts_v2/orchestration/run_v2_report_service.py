@@ -113,6 +113,8 @@ def main() -> int:
         runtime=runner.start_event()["runtime"],
         routes=[
             "/",
+            "/actions",
+            "/actions/run",
             "/interests",
             "/matches",
             "/healthz",
@@ -160,6 +162,18 @@ def build_handler(
                 return
             if path == "/api/reports":
                 self._write_json(HTTPStatus.OK, {"reports": report_entries(reports_dir), "bundles": bundle_entries(exports_dir)})
+                return
+            if path == "/actions":
+                actions_user_id = first_query_value(parse_qs(parsed.query), "user_id") or default_user_id
+                self._write_html(
+                    HTTPStatus.OK,
+                    render_actions_html(
+                        db_path=db_path,
+                        reports_dir=reports_dir,
+                        user_id=actions_user_id,
+                        lookback_hours=default_lookback_hours,
+                    ),
+                )
                 return
             user_route = match_user_api_route(path)
             if user_route is not None:
@@ -237,6 +251,27 @@ def build_handler(
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
+            if parsed.path == "/actions/run":
+                form = parse_qs(self.rfile.read(int(self.headers.get("Content-Length", "0") or "0")).decode("utf-8"))
+                user_id = first_query_value(form, "user_id") or default_user_id
+                action_name = first_query_value(form, "action") or ""
+                try:
+                    self._write_html(
+                        HTTPStatus.OK,
+                        render_action_result_html(
+                            db_path=db_path,
+                            reports_dir=reports_dir,
+                            user_id=user_id,
+                            action_name=action_name,
+                            lookback_hours=parse_int_param(form, "lookback_hours", default=default_lookback_hours),
+                            only_active_listings=parse_bool_param(form, "only_active", default=True),
+                        ),
+                    )
+                except ValueError as exc:
+                    self._write_html(HTTPStatus.BAD_REQUEST, render_error_html(str(exc)))
+                except Exception as exc:  # pragma: no cover - defensive form fallback
+                    self._write_html(HTTPStatus.INTERNAL_SERVER_ERROR, render_error_html(str(exc)))
+                return
             user_route = match_user_api_route(parsed.path)
             if user_route is None:
                 self._write_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Route not found"})
@@ -1052,6 +1087,28 @@ def run_signals_payload(db_path: Path, *, user_id: str, lookback_hours: int) -> 
     }
 
 
+def run_digest_payload(
+    *,
+    db_path: Path,
+    reports_dir: Path,
+    user_id: str,
+    lookback_hours: int,
+) -> dict[str, object]:
+    result = build_interest_digest_report(str(db_path), str(reports_dir), user_id=user_id, lookback_hours=lookback_hours)
+    report_path = Path(result.report_path)
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "lookback_hours": lookback_hours,
+        "result": normalize_dataclass(result),
+        "report": {
+            "name": report_path.name,
+            "rendered": f"/reports/{quote(report_path.name)}",
+            "raw": f"/raw/{quote(report_path.name)}",
+        },
+    }
+
+
 def latest_user_report_path(reports_dir: Path, *, user_id: str, kind: str) -> Path | None:
     for item in report_entries(reports_dir):
         if item["kind"] == kind and item["scope"] == f"Collector: {user_id}":
@@ -1296,6 +1353,437 @@ def build_match_opportunity_note(
     if cost_basis_unit is not None:
         fragments.append(f"cost basis {cost_basis_unit}")
     return " | ".join(fragment for fragment in fragments if fragment)
+
+
+def render_actions_html(
+    *,
+    db_path: Path,
+    reports_dir: Path,
+    user_id: str,
+    lookback_hours: int,
+) -> str:
+    profile_payload = load_user_profile_payload(db_path, user_id=user_id)
+    reports_payload = load_user_reports_payload(reports_dir, user_id=user_id)
+    user = profile_payload["user"]
+    summary = profile_payload["summary"] if isinstance(profile_payload.get("summary"), dict) else {}
+    latest = reports_payload.get("latest") if isinstance(reports_payload.get("latest"), dict) else {}
+    digest = latest.get("digest") if isinstance(latest, dict) and isinstance(latest.get("digest"), dict) else None
+    signal_review = latest.get("signal_review") if isinstance(latest, dict) and isinstance(latest.get("signal_review"), dict) else None
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operator Actions</title>
+  <style>
+    :root {{
+      --bg: #f4ede1;
+      --panel: rgba(255, 250, 244, 0.88);
+      --panel-strong: #fff9f0;
+      --border: #decaae;
+      --ink: #1d2128;
+      --muted: #706658;
+      --accent: #8f3911;
+      --accent-soft: #f1e0cb;
+      --accent-deep: #4e2513;
+      --shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(188, 121, 48, 0.18), transparent 22%),
+        radial-gradient(circle at 80% 10%, rgba(124, 86, 43, 0.1), transparent 20%),
+        linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
+    }}
+    main {{ max-width: 1120px; margin: 0 auto; padding: 36px 20px 60px; }}
+    nav {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 18px;
+    }}
+    nav a {{
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(255, 250, 244, 0.78);
+      color: var(--muted);
+      font-size: 0.92rem;
+      text-decoration: none;
+    }}
+    .hero, .section {{
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 24px;
+      margin-bottom: 22px;
+      box-shadow: var(--shadow);
+    }}
+    .hero {{
+      background: linear-gradient(135deg, rgba(255, 247, 236, 0.98), rgba(241, 223, 195, 0.9));
+    }}
+    .hero h1 {{
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2.1rem, 4vw, 3.3rem);
+      letter-spacing: -0.04em;
+      margin: 0 0 10px;
+    }}
+    .hero p, .section p {{
+      color: var(--muted);
+      line-height: 1.6;
+    }}
+    .eyebrow {{
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }}
+    .chip-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }}
+    .chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 7px 11px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.84rem;
+      font-weight: 600;
+      border: 1px solid var(--border);
+    }}
+    .summary-grid, .actions-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+    }}
+    .summary-card, .action-card {{
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }}
+    .summary-card strong {{
+      display: block;
+      font-size: 1.9rem;
+      font-family: Georgia, "Times New Roman", serif;
+      color: var(--accent-deep);
+      margin-top: 8px;
+    }}
+    .action-card h3 {{
+      margin: 0 0 8px;
+      font-size: 1.12rem;
+    }}
+    .action-card form {{
+      display: grid;
+      gap: 12px;
+      margin-top: 14px;
+    }}
+    .action-card label {{
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 0.94rem;
+    }}
+    .action-card input, .action-card select, .action-card button {{
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 10px 12px;
+      font: inherit;
+      background: #fffdf8;
+      color: var(--ink);
+    }}
+    .action-card button {{
+      background: var(--accent);
+      color: #fff9f0;
+      font-weight: 700;
+      cursor: pointer;
+    }}
+    .action-card button:hover {{
+      background: var(--accent-deep);
+    }}
+    .section-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 18px;
+    }}
+    .report-list {{
+      display: grid;
+      gap: 12px;
+    }}
+    .report-row {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 16px 18px;
+    }}
+    .report-row h3 {{ margin: 0 0 6px; font-size: 1.05rem; }}
+    .report-row p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
+    .meta-stack {{
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }}
+    code {{
+      font-family: "JetBrains Mono", "Cascadia Code", monospace;
+      background: #efe4d4;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }}
+    a {{ color: var(--accent); text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    .empty-state {{ color: var(--muted); margin: 0; }}
+    @media (max-width: 720px) {{
+      .report-row {{
+        grid-template-columns: 1fr;
+      }}
+      .meta-stack {{
+        align-items: flex-start;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <nav>
+      <a href="/?user_id={quote(user_id)}">Dashboard</a>
+      <a href="/actions?user_id={quote(user_id)}">Actions</a>
+      <a href="/interests?user_id={quote(user_id)}">Interests</a>
+      <a href="/matches?user_id={quote(user_id)}">Opportunities</a>
+      <a href="/api/users/{quote(user_id)}/profile">Profile JSON</a>
+    </nav>
+    <section class="hero">
+      <span class="eyebrow">Operator Actions</span>
+      <h1>{html.escape(str(user["display_name"]))}</h1>
+      <p>Trigger the core collector workflows directly from the browser: refresh matching, regenerate signals, and rebuild the latest digest without dropping into shell commands or raw API calls.</p>
+      <div class="chip-row">
+        <span class="chip">User <code>{html.escape(str(user["id"]))}</code></span>
+        <span class="chip">Interests <strong>{summary.get("active_interest_count", 0)}</strong></span>
+        <span class="chip">Matches <strong>{summary.get("active_match_count", 0)}</strong></span>
+        <span class="chip">Signals <strong>{summary.get("active_signal_count", 0)}</strong></span>
+      </div>
+    </section>
+    <section class="actions-grid">
+      <article class="action-card">
+        <span class="eyebrow">Action</span>
+        <h3>Run Matching</h3>
+        <p>Refresh active opportunity inventory for this collector.</p>
+        <form method="post" action="/actions/run">
+          <input type="hidden" name="user_id" value="{html.escape(user_id)}">
+          <input type="hidden" name="action" value="matching">
+          <label>Active listings only
+            <select name="only_active">
+              <option value="true" selected>Yes</option>
+              <option value="false">No</option>
+            </select>
+          </label>
+          <button type="submit">Run matching now</button>
+        </form>
+      </article>
+      <article class="action-card">
+        <span class="eyebrow">Action</span>
+        <h3>Run Signals</h3>
+        <p>Recompute the active signal inbox from the current match and event state.</p>
+        <form method="post" action="/actions/run">
+          <input type="hidden" name="user_id" value="{html.escape(user_id)}">
+          <input type="hidden" name="action" value="signals">
+          <label>Lookback hours
+            <input type="number" name="lookback_hours" min="1" max="168" value="{lookback_hours}">
+          </label>
+          <button type="submit">Run signals now</button>
+        </form>
+      </article>
+      <article class="action-card">
+        <span class="eyebrow">Action</span>
+        <h3>Refresh Digest</h3>
+        <p>Rebuild the latest collector digest and open the new rendered report immediately after.</p>
+        <form method="post" action="/actions/run">
+          <input type="hidden" name="user_id" value="{html.escape(user_id)}">
+          <input type="hidden" name="action" value="digest">
+          <label>Lookback hours
+            <input type="number" name="lookback_hours" min="1" max="168" value="{lookback_hours}">
+          </label>
+          <button type="submit">Refresh digest</button>
+        </form>
+      </article>
+    </section>
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>Latest Outputs</h2>
+          <p>Quick links back into the most recent collector artifacts.</p>
+        </div>
+      </div>
+      <div class="report-list">
+        {render_action_report_row(digest, empty_label="No digest generated yet.")}
+        {render_action_report_row(signal_review, empty_label="No signal review generated yet.")}
+      </div>
+    </section>
+  </main>
+</body>
+</html>"""
+
+
+def render_action_result_html(
+    *,
+    db_path: Path,
+    reports_dir: Path,
+    user_id: str,
+    action_name: str,
+    lookback_hours: int,
+    only_active_listings: bool,
+) -> str:
+    if action_name == "matching":
+        payload = run_matching_payload(db_path, user_id=user_id, only_active_listings=only_active_listings)
+        title = "Matching Complete"
+        summary_bits = [
+            f"user <code>{html.escape(user_id)}</code>",
+            f"active only <code>{str(only_active_listings).lower()}</code>",
+            f"matched <code>{html.escape(str(((payload.get('result') or {}).get('matches_upserted') or 0)))}</code>",
+        ]
+        links_html = "".join(
+            [
+                f'<a href="/matches?user_id={quote(user_id)}">Open opportunities</a>',
+                f'<a href="/api/users/{quote(user_id)}/matches">Matches JSON</a>',
+                f'<a href="/actions?user_id={quote(user_id)}">Back to actions</a>',
+            ]
+        )
+    elif action_name == "signals":
+        payload = run_signals_payload(db_path, user_id=user_id, lookback_hours=lookback_hours)
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        title = "Signals Complete"
+        summary_bits = [
+            f"user <code>{html.escape(user_id)}</code>",
+            f"lookback <code>{lookback_hours}h</code>",
+            f"inserted <code>{html.escape(str(result.get('inserted') or 0))}</code>",
+            f"updated <code>{html.escape(str(result.get('updated') or 0))}</code>",
+        ]
+        links_html = "".join(
+            [
+                f'<a href="/?user_id={quote(user_id)}#signals">Open dashboard signals</a>',
+                f'<a href="/api/users/{quote(user_id)}/signals">Signals JSON</a>',
+                f'<a href="/actions?user_id={quote(user_id)}">Back to actions</a>',
+            ]
+        )
+    elif action_name == "digest":
+        payload = run_digest_payload(db_path=db_path, reports_dir=reports_dir, user_id=user_id, lookback_hours=lookback_hours)
+        report = payload.get("report") if isinstance(payload.get("report"), dict) else {}
+        title = "Digest Refreshed"
+        summary_bits = [
+            f"user <code>{html.escape(user_id)}</code>",
+            f"lookback <code>{lookback_hours}h</code>",
+            f"report <code>{html.escape(str(report.get('name') or '-'))}</code>",
+        ]
+        links_html = "".join(
+            [
+                f'<a href="{html.escape(str(report.get("rendered") or "/"))}">Open rendered digest</a>',
+                f'<a href="{html.escape(str(report.get("raw") or "/"))}">Open raw markdown</a>',
+                f'<a href="/actions?user_id={quote(user_id)}">Back to actions</a>',
+            ]
+        )
+    else:
+        raise ValueError("unknown action")
+
+    pretty_payload = html.escape(json.dumps(payload, ensure_ascii=False, indent=2))
+    summary_html = " | ".join(summary_bits)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)}</title>
+  <style>
+    :root {{
+      --bg: #f4ede1;
+      --panel: rgba(255, 250, 244, 0.88);
+      --panel-strong: #fff9f0;
+      --border: #decaae;
+      --ink: #1d2128;
+      --muted: #706658;
+      --accent: #8f3911;
+      --shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
+      margin: 0;
+      color: var(--ink);
+      background: linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
+    }}
+    main {{ max-width: 960px; margin: 0 auto; padding: 36px 20px 60px; }}
+    .panel {{
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 24px;
+      box-shadow: var(--shadow);
+      margin-bottom: 20px;
+    }}
+    h1 {{
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2rem, 4vw, 3rem);
+      letter-spacing: -0.04em;
+      margin: 0 0 10px;
+    }}
+    p {{ color: var(--muted); line-height: 1.6; }}
+    .link-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 16px;
+    }}
+    pre {{
+      white-space: pre-wrap;
+      overflow-x: auto;
+      background: var(--panel-strong);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 18px;
+      font-family: "JetBrains Mono", "Cascadia Code", monospace;
+      font-size: 0.93rem;
+    }}
+    code {{
+      font-family: "JetBrains Mono", "Cascadia Code", monospace;
+      background: #efe4d4;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }}
+    a {{ color: var(--accent); text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="panel">
+      <h1>{html.escape(title)}</h1>
+      <p>{summary_html}</p>
+      <div class="link-row">{links_html}</div>
+    </section>
+    <section class="panel">
+      <h2>Action Payload</h2>
+      <pre>{pretty_payload}</pre>
+    </section>
+  </main>
+</body>
+</html>"""
 
 
 def render_dashboard_html(
@@ -1695,6 +2183,7 @@ def render_dashboard_html(
   <main>
     <nav>
       <a href="#overview">Overview</a>
+      <a href="/actions?user_id={quote(user_id)}">Actions</a>
       <a href="#signals">Signals</a>
       <a href="/interests?user_id={quote(user_id)}">Interests</a>
       <a href="/matches?user_id={quote(user_id)}">Opportunities</a>
@@ -2147,6 +2636,7 @@ def render_interests_html(
   <main>
     <nav>
       <a href="/?user_id={quote(user_id)}">Dashboard</a>
+      <a href="/actions?user_id={quote(user_id)}">Actions</a>
       <a href="/interests?user_id={quote(user_id)}">Interests</a>
       <a href="/matches?user_id={quote(user_id)}">Opportunities</a>
       <a href="/api/users/{quote(user_id)}/interests">Interests JSON</a>
@@ -2348,6 +2838,7 @@ def render_matches_html(
   <main>
     <nav>
       <a href="/?user_id={quote(user_id)}">Dashboard</a>
+      <a href="/actions?user_id={quote(user_id)}">Actions</a>
       <a href="/matches?user_id={quote(user_id)}">Opportunities</a>
       <a href="/api/users/{quote(user_id)}/matches">Matches JSON</a>
       <a href="/api/users/{quote(user_id)}/matching/run">Matching action</a>
@@ -2655,6 +3146,32 @@ def format_listing_status_label(value: str) -> str:
     if not value:
         return "Unknown"
     return value.title()
+
+
+def render_action_report_row(item: object, *, empty_label: str) -> str:
+    if not isinstance(item, dict):
+        return f'<p class="empty-state">{html.escape(empty_label)}</p>'
+    links = item.get("links") if isinstance(item.get("links"), dict) else {}
+    rendered = links.get("rendered") if isinstance(links, dict) else None
+    raw = links.get("raw") if isinstance(links, dict) else None
+    link_html = ""
+    if rendered:
+        link_html += f'<div><a href="{html.escape(str(rendered))}">Open rendered</a></div>'
+    if raw:
+        link_html += f'<div><a href="{html.escape(str(raw))}">Open raw</a></div>'
+    return f"""
+    <article class="report-row">
+      <div>
+        <span class="pill">{html.escape(str(item.get("label") or "Report"))}</span>
+        <h3>{html.escape(str(item.get("name") or "-"))}</h3>
+        <p>{html.escape(str(item.get("scope") or "-"))}</p>
+      </div>
+      <div class="meta-stack">
+        <span>{html.escape(str(item.get("timestamp_label") or "-"))}</span>
+        {link_html}
+      </div>
+    </article>
+    """
 
 
 def render_report_row(item: dict[str, object]) -> str:
