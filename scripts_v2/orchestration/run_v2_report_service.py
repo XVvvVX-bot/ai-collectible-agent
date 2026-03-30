@@ -10,7 +10,6 @@ import os
 import re
 import sqlite3
 import sys
-import uuid
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,7 +24,7 @@ if str(SRC_DIR) not in sys.path:
 
 from ai_agent_v2.ingestion.live_incremental import DEFAULT_STATE_SOURCE_KEY
 from ai_agent_v2.matching.v2_matcher import run_v2_matching
-from ai_agent_v2.parsing.listing_parser import _classify_parse_family, _parse_coin_title, _parse_stamp_title
+from ai_agent_v2.profile.manual_interest_ops import create_interest_record, delete_interest_record
 from ai_agent_v2.reporting.interest_digest import build_interest_digest_report
 from ai_agent_v2.reporting.signal_review import EVENT_SIGNAL_TYPES
 from ai_agent_v2.runtime_host import BackgroundServiceRunner, DEFAULT_BASE_URL, build_service_config, emit_json
@@ -1027,227 +1026,31 @@ def create_interest_form(
     min_match_score: float | None,
     max_signals_per_day: int,
 ) -> dict[str, object]:
-    valid_interest_kinds = {"collecting", "watch_buy", "watch_sell", "discovery", "portfolio_monitor"}
-    valid_scope_kinds = {"exact_item", "issue_part", "issue_family", "series", "theme", "category", "keyword"}
-    valid_precision_modes = {"exact", "balanced", "broad"}
-    valid_priorities = {"high", "normal", "low"}
-    valid_condition_modes = {"ignore", "prefer", "require"}
-    valid_delivery_modes = {"immediate", "daily_digest", "silent_log"}
-
-    interest_name = interest_name.strip()
-    raw_input = raw_input.strip()
-    interest_notes = interest_notes.strip()
-    if not interest_name:
-        raise ValueError("interest_name is required")
-    if not raw_input:
-        raise ValueError("raw_input is required")
-    if interest_kind not in valid_interest_kinds:
-        raise ValueError("invalid interest_kind")
-    if scope_kind not in valid_scope_kinds:
-        raise ValueError("invalid scope_kind")
-    if precision_mode not in valid_precision_modes:
-        raise ValueError("invalid precision_mode")
-    if interest_priority not in valid_priorities:
-        raise ValueError("invalid interest_priority")
-    if condition_mode not in valid_condition_modes:
-        raise ValueError("invalid condition_mode")
-    if delivery_mode not in valid_delivery_modes:
-        raise ValueError("invalid delivery_mode")
-
-    now_iso = utc_now_iso()
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        user_row = conn.execute(
-            """
-            SELECT id
-            FROM users
-            WHERE id = ?
-            """,
-            (user_id,),
-        ).fetchone()
-        if user_row is None:
-            raise ValueError(f"user not found: {user_id}")
-
-        defaults_row = conn.execute(
-            """
-            SELECT default_min_match_score, default_allow_related_matches, default_allow_series_matches,
-                   default_allow_variant_matches, default_condition_mode, default_delivery_mode,
-                   default_cooldown_hours
-            FROM user_profile_defaults_v2
-            WHERE user_id = ?
-            """,
-            (user_id,),
-        ).fetchone()
-        defaults = normalize_sqlite_row(defaults_row) if defaults_row is not None else {}
-
-        parsed_target = build_manual_interest_target(
-            raw_input=raw_input,
-            scope_kind=scope_kind,
-            precision_mode=precision_mode,
-            interest_priority=interest_priority,
-            condition_mode=condition_mode,
-            budget_max=budget_max,
-        )
-        allow_related_matches, allow_series_matches, allow_variant_matches = resolve_match_flags(
-            scope_kind=scope_kind,
-            precision_mode=precision_mode,
-            defaults=defaults,
-        )
-        policy_values = resolve_signal_policy_defaults(
-            interest_kind=interest_kind,
-            delivery_mode=delivery_mode,
-            cooldown_hours=cooldown_hours,
-            min_match_score=min_match_score if min_match_score is not None else defaults.get("default_min_match_score"),
-            max_signals_per_day=max_signals_per_day,
-            allow_series_matches=allow_series_matches,
-            allow_variant_matches=allow_variant_matches,
-        )
-
-        interest_id = str(uuid.uuid4())
-        target_id = str(uuid.uuid4())
-        policy_id = str(uuid.uuid4())
-        conn.execute(
-            """
-            INSERT INTO user_interests_v2 (
-              id,
-              user_id,
-              legacy_user_item_id,
-              interest_name,
-              interest_kind,
-              scope_kind,
-              precision_mode,
-              interest_priority,
-              intent_confidence,
-              allow_related_matches,
-              allow_series_matches,
-              allow_variant_matches,
-              active_status,
-              notes,
-              created_at,
-              updated_at
-            ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
-            """,
-            (
-                interest_id,
-                user_id,
-                interest_name,
-                interest_kind,
-                scope_kind,
-                precision_mode,
-                interest_priority,
-                resolve_intent_confidence(interest_kind),
-                int(allow_related_matches),
-                int(allow_series_matches),
-                int(allow_variant_matches),
-                interest_notes,
-                now_iso,
-                now_iso,
-            ),
-        )
-        conn.execute(
-            """
-            INSERT INTO user_interest_targets_v2 (
-              id,
-              interest_id,
-              target_label,
-              target_kind,
-              parse_family,
-              raw_input,
-              normalized_name,
-              issue_code_norm,
-              issue_part_token,
-              series_key,
-              theme_name,
-              asset_type,
-              variant_tokens_json,
-              quantity_tokens_json,
-              condition_tokens_json,
-              condition_mode,
-              year_value,
-              budget_min,
-              budget_max,
-              strictness_override,
-              priority_override,
-              is_active,
-              created_at,
-              updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-            """,
-            (
-                target_id,
-                interest_id,
-                str(parsed_target["target_label"]),
-                str(parsed_target["target_kind"]),
-                str(parsed_target["parse_family"]),
-                raw_input,
-                parsed_target["normalized_name"],
-                parsed_target["issue_code_norm"],
-                parsed_target["issue_part_token"],
-                parsed_target["series_key"],
-                parsed_target["theme_name"],
-                parsed_target["asset_type"],
-                str(parsed_target["variant_tokens_json"]),
-                str(parsed_target["quantity_tokens_json"]),
-                str(parsed_target["condition_tokens_json"]),
-                condition_mode,
-                parsed_target["year_value"],
-                None,
-                budget_max,
-                precision_mode,
-                interest_priority,
-                now_iso,
-                now_iso,
-            ),
-        )
-        conn.execute(
-            """
-            INSERT INTO user_interest_signal_policies_v2 (
-              id,
-              interest_id,
-              notify_on_preview,
-              notify_on_live,
-              notify_on_ended,
-              notify_on_exact_match,
-              notify_on_variant_match,
-              notify_on_series_match,
-              notify_on_price_opportunity,
-              notify_on_sell_opportunity,
-              min_match_score,
-              cooldown_hours,
-              delivery_mode,
-              max_signals_per_day,
-              created_at,
-              updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                policy_id,
-                interest_id,
-                policy_values["notify_on_preview"],
-                policy_values["notify_on_live"],
-                policy_values["notify_on_ended"],
-                policy_values["notify_on_exact_match"],
-                policy_values["notify_on_variant_match"],
-                policy_values["notify_on_series_match"],
-                policy_values["notify_on_price_opportunity"],
-                policy_values["notify_on_sell_opportunity"],
-                policy_values["min_match_score"],
-                policy_values["cooldown_hours"],
-                policy_values["delivery_mode"],
-                policy_values["max_signals_per_day"],
-                now_iso,
-                now_iso,
-            ),
-        )
-        conn.commit()
-
+    created_record = create_interest_record(
+        db_path=db_path,
+        user_id=user_id,
+        interest_name=interest_name,
+        raw_input=raw_input,
+        interest_kind=interest_kind,
+        scope_kind=scope_kind,
+        precision_mode=precision_mode,
+        interest_priority=interest_priority,
+        interest_notes=interest_notes,
+        budget_max=budget_max,
+        condition_mode=condition_mode,
+        delivery_mode=delivery_mode,
+        cooldown_hours=cooldown_hours,
+        min_match_score=min_match_score,
+        max_signals_per_day=max_signals_per_day,
+    )
+    interest_id = str(created_record["interest_id"])
     created = load_interest_editor_payload(db_path, user_id=user_id, interest_id=interest_id)
     return {
         "ok": True,
-        "created_at": now_iso,
+        "created_at": created_record["created_at"],
         "user": created["user"],
         "interest": created["interest"],
-        "target_id": target_id,
+        "target_id": created_record["target_id"],
     }
 
 
@@ -1371,90 +1174,18 @@ def delete_interest_form(
     user_id: str,
     interest_id: str,
 ) -> dict[str, object]:
-    now_iso = utc_now_iso()
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        interest_row = conn.execute(
-            """
-            SELECT id, interest_name, active_status
-            FROM user_interests_v2
-            WHERE id = ? AND user_id = ?
-            """,
-            (interest_id, user_id),
-        ).fetchone()
-        if interest_row is None:
-            raise ValueError(f"interest not found: {interest_id}")
-
-        target_rows = conn.execute(
-            """
-            SELECT id
-            FROM user_interest_targets_v2
-            WHERE interest_id = ?
-            """,
-            (interest_id,),
-        ).fetchall()
-        target_ids = [str(row["id"]) for row in target_rows]
-        holding_rows = conn.execute(
-            """
-            SELECT id
-            FROM user_holdings_v2
-            WHERE user_id = ? AND linked_interest_id = ?
-            """,
-            (user_id, interest_id),
-        ).fetchall()
-        holding_ids = [str(row["id"]) for row in holding_rows]
-
-        conn.execute(
-            """
-            UPDATE user_interests_v2
-            SET active_status = 'inactive',
-                updated_at = ?
-            WHERE id = ? AND user_id = ?
-            """,
-            (now_iso, interest_id, user_id),
-        )
-        conn.execute(
-            """
-            UPDATE user_interest_targets_v2
-            SET is_active = 0,
-                updated_at = ?
-            WHERE interest_id = ?
-            """,
-            (now_iso, interest_id),
-        )
-        conn.execute(
-            """
-            UPDATE signals_v2
-            SET status = 'inactive',
-                last_seen_at = ?
-            WHERE user_id = ? AND interest_id = ? AND status = 'active'
-            """,
-            (now_iso, user_id, interest_id),
-        )
-        related_item_ids = target_ids + holding_ids
-        if related_item_ids:
-            placeholders = ",".join("?" for _ in related_item_ids)
-            conn.execute(
-                f"""
-                UPDATE listing_matches_v2
-                SET status = 'inactive',
-                    updated_at = ?
-                WHERE user_id = ? AND status = 'active' AND user_item_id IN ({placeholders})
-                """,
-                (now_iso, user_id, *related_item_ids),
-            )
-        conn.commit()
-
+    deleted_record = delete_interest_record(
+        db_path=db_path,
+        user_id=user_id,
+        interest_id=interest_id,
+    )
     refreshed = load_user_interests_payload(db_path, user_id=user_id)
     return {
         "ok": True,
-        "deleted_at": now_iso,
+        "deleted_at": deleted_record["deleted_at"],
         "user": refreshed["user"],
         "summary": refreshed["summary"],
-        "interest": {
-            "id": str(interest_row["id"]),
-            "interest_name": str(interest_row["interest_name"] or interest_id),
-        },
+        "interest": deleted_record["interest"],
     }
 
 

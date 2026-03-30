@@ -2,8 +2,8 @@ import sqlite3
 import uuid
 from pathlib import Path
 
+from ai_agent_v2.profile.manual_interest_ops import create_interest_record, delete_interest_record
 from ai_agent_v2.storage.sqlite_store import SqliteV2Store
-from scripts_v2.orchestration.run_v2_report_service import create_interest_form, delete_interest_form
 
 
 def _seed_user(conn: sqlite3.Connection, *, user_id: str, now: str) -> None:
@@ -39,7 +39,7 @@ def test_create_interest_form_creates_interest_target_and_policy(tmp_path: Path)
     with sqlite3.connect(db_path) as conn:
         _seed_user(conn, user_id="u-ops", now=now)
 
-    payload = create_interest_form(
+    result = create_interest_record(
         db_path=db_path,
         user_id="u-ops",
         interest_name="中国龙抢拍",
@@ -56,16 +56,12 @@ def test_create_interest_form_creates_interest_target_and_policy(tmp_path: Path)
         min_match_score=90.0,
         max_signals_per_day=6,
     )
-
-    interest = payload["interest"]
-    assert payload["ok"] is True
-    assert interest["interest_name"] == "中国龙抢拍"
-    assert interest["interest_priority"] == "high"
+    assert result["ok"] is True
 
     with sqlite3.connect(db_path) as conn:
         interest_row = conn.execute(
             """
-            SELECT interest_kind, scope_kind, precision_mode, active_status,
+            SELECT interest_name, interest_kind, scope_kind, precision_mode, interest_priority, active_status,
                    allow_related_matches, allow_series_matches, allow_variant_matches, notes
             FROM user_interests_v2
             WHERE user_id = 'u-ops'
@@ -88,7 +84,7 @@ def test_create_interest_form_creates_interest_target_and_policy(tmp_path: Path)
             """
         ).fetchone()
 
-    assert interest_row == ("watch_buy", "exact_item", "exact", "active", 0, 0, 0, "operator-created")
+    assert interest_row == ("中国龙抢拍", "watch_buy", "exact_item", "exact", "high", "active", 0, 0, 0, "operator-created")
     assert target_row == (
         "2026年中国龙31.104克普制银币",
         "listing_identity",
@@ -113,7 +109,7 @@ def test_delete_interest_form_soft_deactivates_interest_targets_matches_and_sign
     with sqlite3.connect(db_path) as conn:
         _seed_user(conn, user_id="u-ops", now=now)
 
-    created = create_interest_form(
+    created = create_interest_record(
         db_path=db_path,
         user_id="u-ops",
         interest_name="红楼梦卖点",
@@ -130,7 +126,7 @@ def test_delete_interest_form_soft_deactivates_interest_targets_matches_and_sign
         min_match_score=88.0,
         max_signals_per_day=4,
     )
-    interest_id = str(created["interest"]["id"])
+    interest_id = str(created["interest_id"])
     target_id = str(created["target_id"])
 
     with sqlite3.connect(db_path) as conn:
@@ -167,10 +163,10 @@ def test_delete_interest_form_soft_deactivates_interest_targets_matches_and_sign
         )
         conn.commit()
 
-    deleted = delete_interest_form(db_path=db_path, user_id="u-ops", interest_id=interest_id)
+    deleted = delete_interest_record(db_path=db_path, user_id="u-ops", interest_id=interest_id)
 
     assert deleted["ok"] is True
-    assert deleted["summary"]["active_interest_count"] == 0
+    assert deleted["interest"]["interest_name"] == "红楼梦卖点"
 
     with sqlite3.connect(db_path) as conn:
         interest_status = conn.execute(
