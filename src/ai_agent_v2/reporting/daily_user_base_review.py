@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from ai_agent_v2.clients.zhaoonline import now_utc_iso
 from ai_agent_v2.reporting.signal_review import EVENT_SIGNAL_TYPES
 from ai_agent_v2.storage.sqlite_store import SqliteV2Store
 
@@ -24,11 +23,13 @@ def build_daily_user_base_review_report(
     output_dir: str,
     *,
     lookback_hours: int = 24,
+    now_utc: datetime | None = None,
 ) -> DailyUserBaseReviewReportResult:
     SqliteV2Store(db_path).ensure_schema()
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    since_iso = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).isoformat()
+    current_utc = now_utc or datetime.now(timezone.utc)
+    since_iso = (current_utc - timedelta(hours=lookback_hours)).isoformat()
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -43,7 +44,7 @@ def build_daily_user_base_review_report(
         ).fetchall()
         user_sections = [_build_user_section(conn, row, since_iso=since_iso) for row in user_rows]
 
-    timestamp = now_utc_iso().replace(":", "").replace("-", "").replace("+00:00", "Z")
+    timestamp = current_utc.replace(microsecond=0).isoformat().replace(":", "").replace("-", "").replace("+00:00", "Z")
     report_path = out_dir / f"v2_daily_user_base_review_{timestamp}.md"
     report_path.write_text(
         _render_report(user_sections, lookback_hours=lookback_hours),
