@@ -19,8 +19,18 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SRC_DIR = ROOT_DIR / "src"
+ORCH_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+if str(ORCH_DIR) not in sys.path:
+    sys.path.insert(0, str(ORCH_DIR))
+
+from report_ui.layout import (
+    html_lang_attr,
+    render_dashboard_anchor_nav,
+    render_document,
+    show_app_dev_ui,
+)
 
 from ai_agent_v2.ingestion.live_incremental import DEFAULT_STATE_SOURCE_KEY
 from ai_agent_v2.matching.v2_matcher import run_v2_matching
@@ -187,7 +197,14 @@ def build_handler(
                 interests_user_id = first_query_value(query, "user_id") or default_user_id
                 interest_id = first_query_value(query, "interest_id")
                 if not interest_id:
-                    self._write_html(HTTPStatus.BAD_REQUEST, render_error_html("interest_id is required"))
+                    self._write_html(
+                        HTTPStatus.BAD_REQUEST,
+                        render_error_html(
+                            "interest_id is required",
+                            db_path=db_path,
+                            user_id=interests_user_id,
+                        ),
+                    )
                     return
                 try:
                     self._write_html(
@@ -199,7 +216,10 @@ def build_handler(
                         ),
                     )
                 except ValueError as exc:
-                    self._write_html(HTTPStatus.NOT_FOUND, render_error_html(str(exc)))
+                    self._write_html(
+                        HTTPStatus.NOT_FOUND,
+                        render_error_html(str(exc), db_path=db_path, user_id=interests_user_id),
+                    )
                 return
             if path == "/interests/new":
                 query = parse_qs(parsed.query)
@@ -213,7 +233,10 @@ def build_handler(
                         ),
                     )
                 except ValueError as exc:
-                    self._write_html(HTTPStatus.NOT_FOUND, render_error_html(str(exc)))
+                    self._write_html(
+                        HTTPStatus.NOT_FOUND,
+                        render_error_html(str(exc), db_path=db_path, user_id=interests_user_id),
+                    )
                 return
             user_route = match_user_api_route(path)
             if user_route is not None:
@@ -257,7 +280,14 @@ def build_handler(
                 report_kind = unquote(path.removeprefix("/latest/"))
                 target = latest_report_for_kind(reports_dir, report_kind)
                 if target is None:
-                    self._write_html(HTTPStatus.NOT_FOUND, render_error_html("Latest report not found"))
+                    self._write_html(
+                        HTTPStatus.NOT_FOUND,
+                        render_error_html(
+                            "Latest report not found",
+                            db_path=db_path,
+                            user_id=default_user_id,
+                        ),
+                    )
                     return
                 self.send_response(HTTPStatus.FOUND)
                 self.send_header("Location", f"/reports/{quote(target.name)}")
@@ -267,7 +297,14 @@ def build_handler(
                 name = unquote(path.removeprefix("/reports/"))
                 target = safe_child(reports_dir, name)
                 if target is None or not target.exists():
-                    self._write_html(HTTPStatus.NOT_FOUND, render_error_html("Report not found"))
+                    self._write_html(
+                        HTTPStatus.NOT_FOUND,
+                        render_error_html(
+                            "Report not found",
+                            db_path=db_path,
+                            user_id=default_user_id,
+                        ),
+                    )
                     return
                 self._write_html(HTTPStatus.OK, render_report_html(target))
                 return
@@ -275,7 +312,14 @@ def build_handler(
                 name = unquote(path.removeprefix("/raw/"))
                 target = safe_child(reports_dir, name)
                 if target is None or not target.exists():
-                    self._write_html(HTTPStatus.NOT_FOUND, render_error_html("Report not found"))
+                    self._write_html(
+                        HTTPStatus.NOT_FOUND,
+                        render_error_html(
+                            "Report not found",
+                            db_path=db_path,
+                            user_id=default_user_id,
+                        ),
+                    )
                     return
                 self._write_file(target, "text/markdown; charset=utf-8", as_attachment=False)
                 return
@@ -283,11 +327,25 @@ def build_handler(
                 name = unquote(path.removeprefix("/downloads/"))
                 target = safe_child(exports_dir, name)
                 if target is None or not target.exists():
-                    self._write_html(HTTPStatus.NOT_FOUND, render_error_html("Bundle not found"))
+                    self._write_html(
+                        HTTPStatus.NOT_FOUND,
+                        render_error_html(
+                            "Bundle not found",
+                            db_path=db_path,
+                            user_id=default_user_id,
+                        ),
+                    )
                     return
                 self._write_file(target, "application/zip", as_attachment=True)
                 return
-            self._write_html(HTTPStatus.NOT_FOUND, render_error_html("Route not found"))
+            self._write_html(
+                HTTPStatus.NOT_FOUND,
+                render_error_html(
+                    "Route not found",
+                    db_path=db_path,
+                    user_id=default_user_id,
+                ),
+            )
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
@@ -315,21 +373,35 @@ def build_handler(
                     self._write_html(
                         HTTPStatus.OK,
                         render_interest_create_result_html(
+                            db_path=db_path,
                             payload=payload,
                             user_id=user_id,
                         ),
                     )
                 except ValueError as exc:
-                    self._write_html(HTTPStatus.BAD_REQUEST, render_error_html(str(exc)))
+                    self._write_html(
+                        HTTPStatus.BAD_REQUEST,
+                        render_error_html(str(exc), db_path=db_path, user_id=user_id),
+                    )
                 except Exception as exc:  # pragma: no cover - defensive form fallback
-                    self._write_html(HTTPStatus.INTERNAL_SERVER_ERROR, render_error_html(str(exc)))
+                    self._write_html(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        render_error_html(str(exc), db_path=db_path, user_id=user_id),
+                    )
                 return
             if parsed.path == "/interests/save":
                 form = parse_qs(self.rfile.read(int(self.headers.get("Content-Length", "0") or "0")).decode("utf-8"))
                 user_id = first_query_value(form, "user_id") or default_user_id
                 interest_id = first_query_value(form, "interest_id")
                 if not interest_id:
-                    self._write_html(HTTPStatus.BAD_REQUEST, render_error_html("interest_id is required"))
+                    self._write_html(
+                        HTTPStatus.BAD_REQUEST,
+                        render_error_html(
+                            "interest_id is required",
+                            db_path=db_path,
+                            user_id=user_id,
+                        ),
+                    )
                     return
                 try:
                     payload = save_interest_form(
@@ -348,22 +420,36 @@ def build_handler(
                     self._write_html(
                         HTTPStatus.OK,
                         render_interest_save_result_html(
+                            db_path=db_path,
                             payload=payload,
                             user_id=user_id,
                             interest_id=interest_id,
                         ),
                     )
                 except ValueError as exc:
-                    self._write_html(HTTPStatus.BAD_REQUEST, render_error_html(str(exc)))
+                    self._write_html(
+                        HTTPStatus.BAD_REQUEST,
+                        render_error_html(str(exc), db_path=db_path, user_id=user_id),
+                    )
                 except Exception as exc:  # pragma: no cover - defensive form fallback
-                    self._write_html(HTTPStatus.INTERNAL_SERVER_ERROR, render_error_html(str(exc)))
+                    self._write_html(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        render_error_html(str(exc), db_path=db_path, user_id=user_id),
+                    )
                 return
             if parsed.path == "/interests/delete":
                 form = parse_qs(self.rfile.read(int(self.headers.get("Content-Length", "0") or "0")).decode("utf-8"))
                 user_id = first_query_value(form, "user_id") or default_user_id
                 interest_id = first_query_value(form, "interest_id")
                 if not interest_id:
-                    self._write_html(HTTPStatus.BAD_REQUEST, render_error_html("interest_id is required"))
+                    self._write_html(
+                        HTTPStatus.BAD_REQUEST,
+                        render_error_html(
+                            "interest_id is required",
+                            db_path=db_path,
+                            user_id=user_id,
+                        ),
+                    )
                     return
                 try:
                     payload = delete_interest_form(
@@ -374,14 +460,21 @@ def build_handler(
                     self._write_html(
                         HTTPStatus.OK,
                         render_interest_delete_result_html(
+                            db_path=db_path,
                             payload=payload,
                             user_id=user_id,
                         ),
                     )
                 except ValueError as exc:
-                    self._write_html(HTTPStatus.BAD_REQUEST, render_error_html(str(exc)))
+                    self._write_html(
+                        HTTPStatus.BAD_REQUEST,
+                        render_error_html(str(exc), db_path=db_path, user_id=user_id),
+                    )
                 except Exception as exc:  # pragma: no cover - defensive form fallback
-                    self._write_html(HTTPStatus.INTERNAL_SERVER_ERROR, render_error_html(str(exc)))
+                    self._write_html(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        render_error_html(str(exc), db_path=db_path, user_id=user_id),
+                    )
                 return
             if parsed.path == "/actions/run":
                 form = parse_qs(self.rfile.read(int(self.headers.get("Content-Length", "0") or "0")).decode("utf-8"))
@@ -400,9 +493,15 @@ def build_handler(
                         ),
                     )
                 except ValueError as exc:
-                    self._write_html(HTTPStatus.BAD_REQUEST, render_error_html(str(exc)))
+                    self._write_html(
+                        HTTPStatus.BAD_REQUEST,
+                        render_error_html(str(exc), db_path=db_path, user_id=user_id),
+                    )
                 except Exception as exc:  # pragma: no cover - defensive form fallback
-                    self._write_html(HTTPStatus.INTERNAL_SERVER_ERROR, render_error_html(str(exc)))
+                    self._write_html(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        render_error_html(str(exc), db_path=db_path, user_id=user_id),
+                    )
                 return
             user_route = match_user_api_route(parsed.path)
             if user_route is None:
@@ -489,6 +588,8 @@ def build_handler(
             body = html_body.encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            # Avoid stale SSR during local edits (browser heuristic cache).
+            self.send_header("Cache-Control", "no-store, max-age=0, must-revalidate")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -866,6 +967,15 @@ def load_user_profile_payload(db_path: Path, *, user_id: str) -> dict[str, objec
         },
         "interests": interests,
     }
+
+
+def profile_html_lang(db_path: Path, *, user_id: str) -> str:
+    try:
+        payload = load_user_profile_payload(db_path, user_id=user_id)
+    except ValueError:
+        return "en"
+    user_obj = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+    return html_lang_attr(str(user_obj.get("language") or ""))
 
 
 def load_user_interests_payload(db_path: Path, *, user_id: str) -> dict[str, object]:
@@ -1898,297 +2008,92 @@ def render_actions_html(
     latest = reports_payload.get("latest") if isinstance(reports_payload.get("latest"), dict) else {}
     digest = latest.get("digest") if isinstance(latest, dict) and isinstance(latest.get("digest"), dict) else None
     signal_review = latest.get("signal_review") if isinstance(latest, dict) and isinstance(latest.get("signal_review"), dict) else None
-
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Operator Actions</title>
-  <style>
-    :root {{
-      --bg: #f4ede1;
-      --panel: rgba(255, 250, 244, 0.88);
-      --panel-strong: #fff9f0;
-      --border: #decaae;
-      --ink: #1d2128;
-      --muted: #706658;
-      --accent: #8f3911;
-      --accent-soft: #f1e0cb;
-      --accent-deep: #4e2513;
-      --shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
-      margin: 0;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at top left, rgba(188, 121, 48, 0.18), transparent 22%),
-        radial-gradient(circle at 80% 10%, rgba(124, 86, 43, 0.1), transparent 20%),
-        linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
-    }}
-    main {{ max-width: 1120px; margin: 0 auto; padding: 36px 20px 60px; }}
-    nav {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-bottom: 18px;
-    }}
-    nav a {{
-      padding: 8px 12px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: rgba(255, 250, 244, 0.78);
-      color: var(--muted);
-      font-size: 0.92rem;
-      text-decoration: none;
-    }}
-    .action-button, .danger-button {{
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      border-radius: 999px;
-      padding: 9px 14px;
-      border: 1px solid var(--border);
-      text-decoration: none;
-      font-size: 0.92rem;
-      cursor: pointer;
-    }}
-    .action-button {{
-      background: var(--accent);
-      color: #fff9f0;
-    }}
-    .danger-button {{
-      background: #fff3ef;
-      color: #8b2d17;
-    }}
-    .hero, .section {{
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 28px;
-      padding: 24px;
-      margin-bottom: 22px;
-      box-shadow: var(--shadow);
-    }}
-    .hero {{
-      background: linear-gradient(135deg, rgba(255, 247, 236, 0.98), rgba(241, 223, 195, 0.9));
-    }}
-    .hero h1 {{
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2.1rem, 4vw, 3.3rem);
-      letter-spacing: -0.04em;
-      margin: 0 0 10px;
-    }}
-    .hero p, .section p {{
-      color: var(--muted);
-      line-height: 1.6;
-    }}
-    .eyebrow {{
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-      font-size: 0.78rem;
-      color: var(--muted);
-    }}
-    .chip-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 16px;
-    }}
-    .chip {{
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      border-radius: 999px;
-      padding: 7px 11px;
-      background: var(--accent-soft);
-      color: var(--accent);
-      font-size: 0.84rem;
-      font-weight: 600;
-      border: 1px solid var(--border);
-    }}
-    .summary-grid, .actions-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 14px;
-    }}
-    .summary-card, .action-card {{
-      background: var(--panel-strong);
-      border: 1px solid var(--border);
-      border-radius: 22px;
-      padding: 18px;
-      box-shadow: var(--shadow);
-    }}
-    .summary-card strong {{
-      display: block;
-      font-size: 1.9rem;
-      font-family: Georgia, "Times New Roman", serif;
-      color: var(--accent-deep);
-      margin-top: 8px;
-    }}
-    .action-card h3 {{
-      margin: 0 0 8px;
-      font-size: 1.12rem;
-    }}
-    .action-card form {{
-      display: grid;
-      gap: 12px;
-      margin-top: 14px;
-    }}
-    .action-card label {{
-      display: grid;
-      gap: 6px;
-      color: var(--muted);
-      font-size: 0.94rem;
-    }}
-    .action-card input, .action-card select, .action-card button {{
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 10px 12px;
-      font: inherit;
-      background: #fffdf8;
-      color: var(--ink);
-    }}
-    .action-card button {{
-      background: var(--accent);
-      color: #fff9f0;
-      font-weight: 700;
-      cursor: pointer;
-    }}
-    .action-card button:hover {{
-      background: var(--accent-deep);
-    }}
-    .section-header {{
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      gap: 12px;
-      margin-bottom: 18px;
-    }}
-    .report-list {{
-      display: grid;
-      gap: 12px;
-    }}
-    .report-row {{
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 14px;
-      align-items: center;
-      background: var(--panel-strong);
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 16px 18px;
-    }}
-    .report-row h3 {{ margin: 0 0 6px; font-size: 1.05rem; }}
-    .report-row p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
-    .meta-stack {{
-      display: flex;
-      flex-direction: column;
-      align-items: flex-end;
-      gap: 8px;
-      color: var(--muted);
-      font-size: 0.92rem;
-    }}
-    code {{
-      font-family: "JetBrains Mono", "Cascadia Code", monospace;
-      background: #efe4d4;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }}
-    a {{ color: var(--accent); text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    .empty-state {{ color: var(--muted); margin: 0; }}
-    @media (max-width: 720px) {{
-      .report-row {{
-        grid-template-columns: 1fr;
-      }}
-      .meta-stack {{
-        align-items: flex-start;
-      }}
-    }}
-  </style>
-</head>
-<body>
-  <main>
-    <nav>
-      <a href="/?user_id={quote(user_id)}">Dashboard</a>
-      <a href="/actions?user_id={quote(user_id)}">Actions</a>
-      <a href="/interests?user_id={quote(user_id)}">Interests</a>
-      <a href="/matches?user_id={quote(user_id)}">Opportunities</a>
-      <a href="/api/users/{quote(user_id)}/profile">Profile JSON</a>
-    </nav>
-    <section class="hero">
-      <span class="eyebrow">Operator Actions</span>
+    lang = html_lang_attr(str(user.get("language") or ""))
+    inner = f"""
+    <div class="detail-body">
+    <section class="hero page-hero">
+      <span class="eyebrow">Settings &amp; refresh</span>
       <h1>{html.escape(str(user["display_name"]))}</h1>
-      <p>Trigger the core collector workflows directly from the browser: refresh matching, regenerate signals, and rebuild the latest digest without dropping into shell commands or raw API calls.</p>
+      <p>Refresh matches when the market changes, regenerate alerts after big updates, or rebuild your digest for a fresh read. These steps run on the server and may take up to a minute.</p>
       <div class="chip-row">
-        <span class="chip">User <code>{html.escape(str(user["id"]))}</code></span>
-        <span class="chip">Interests <strong>{summary.get("active_interest_count", 0)}</strong></span>
+        <span class="chip">Saved interests <strong>{summary.get("active_interest_count", 0)}</strong></span>
         <span class="chip">Matches <strong>{summary.get("active_match_count", 0)}</strong></span>
-        <span class="chip">Signals <strong>{summary.get("active_signal_count", 0)}</strong></span>
+        <span class="chip">Alerts <strong>{summary.get("active_signal_count", 0)}</strong></span>
       </div>
     </section>
     <section class="actions-grid">
       <article class="action-card">
-        <span class="eyebrow">Action</span>
-        <h3>Run Matching</h3>
-        <p>Refresh active opportunity inventory for this collector.</p>
-        <form method="post" action="/actions/run">
+        <span class="eyebrow">Step</span>
+        <h3>Refresh live matches</h3>
+        <p>Re-scan listings against your saved interests. By default only live and preview auctions are included.</p>
+        <form method="post" action="/actions/run" onsubmit="return confirm(&quot;Refresh your match list now? You can keep browsing while this finishes.&quot;);">
           <input type="hidden" name="user_id" value="{html.escape(user_id)}">
           <input type="hidden" name="action" value="matching">
-          <label>Active listings only
-            <select name="only_active">
-              <option value="true" selected>Yes</option>
-              <option value="false">No</option>
-            </select>
-          </label>
-          <button type="submit">Run matching now</button>
+          <div class="radio-stack">
+            <div class="radio-line">
+              <input type="radio" name="only_active" id="only_act_yes" value="true" checked>
+              <label for="only_act_yes"><strong>Live &amp; preview only</strong><span class="field-help">Focus on auctions you can still bid on.</span></label>
+            </div>
+            <div class="radio-line">
+              <input type="radio" name="only_active" id="only_act_no" value="false">
+              <label for="only_act_no"><strong>Include ended listings</strong><span class="field-help">Slower—useful for comps and research.</span></label>
+            </div>
+          </div>
+          <button type="submit">Run refresh</button>
         </form>
       </article>
       <article class="action-card">
-        <span class="eyebrow">Action</span>
-        <h3>Run Signals</h3>
-        <p>Recompute the active signal inbox from the current match and event state.</p>
-        <form method="post" action="/actions/run">
+        <span class="eyebrow">Step</span>
+        <h3>Regenerate alerts</h3>
+        <p>Rebuild alert notices from current matches (uses the lookback window below).</p>
+        <form method="post" action="/actions/run" onsubmit="return confirm(&quot;Regenerate alerts now?&quot;);">
           <input type="hidden" name="user_id" value="{html.escape(user_id)}">
           <input type="hidden" name="action" value="signals">
-          <label>Lookback hours
+          <label>Lookback (hours)
             <input type="number" name="lookback_hours" min="1" max="168" value="{lookback_hours}">
           </label>
-          <button type="submit">Run signals now</button>
+          <button type="submit">Regenerate alerts</button>
         </form>
       </article>
       <article class="action-card">
-        <span class="eyebrow">Action</span>
-        <h3>Refresh Digest</h3>
-        <p>Rebuild the latest collector digest and open the new rendered report immediately after.</p>
-        <form method="post" action="/actions/run">
+        <span class="eyebrow">Step</span>
+        <h3>Rebuild digest</h3>
+        <p>Create a fresh written digest PDF-style report from recent activity.</p>
+        <form method="post" action="/actions/run" onsubmit="return confirm(&quot;Rebuild digest now?&quot;);">
           <input type="hidden" name="user_id" value="{html.escape(user_id)}">
           <input type="hidden" name="action" value="digest">
-          <label>Lookback hours
+          <label>Lookback (hours)
             <input type="number" name="lookback_hours" min="1" max="168" value="{lookback_hours}">
           </label>
-          <button type="submit">Refresh digest</button>
+          <button type="submit">Rebuild digest</button>
         </form>
       </article>
     </section>
     <section class="section">
       <div class="section-header">
         <div>
-          <h2>Latest Outputs</h2>
-          <p>Quick links back into the most recent collector artifacts.</p>
+          <h2>Latest generated reports</h2>
+          <p>Open the newest digest or signal roundup rendered for this collector.</p>
         </div>
       </div>
       <div class="report-list">
         {render_action_report_row(digest, empty_label="No digest generated yet.")}
-        {render_action_report_row(signal_review, empty_label="No signal review generated yet.")}
+        {render_action_report_row(signal_review, empty_label="No signal roundup generated yet.")}
       </div>
     </section>
-  </main>
-</body>
-</html>"""
+    </div>
+    """
+
+    add_css = ".field-help { display: block; font-size: 0.86rem; color: var(--muted); margin-top: 2px; }"
+    return render_document(
+        title="Settings & refresh",
+        html_lang=lang,
+        user_id=user_id,
+        nav_active="settings",
+        main_inner_html=inner.strip(),
+        main_classes="page-wide detail-body-wrap",
+        extra_css=add_css,
+    )
 
 
 def render_action_result_html(
@@ -2200,139 +2105,93 @@ def render_action_result_html(
     lookback_hours: int,
     only_active_listings: bool,
 ) -> str:
+    lang = profile_html_lang(db_path, user_id=user_id)
     if action_name == "matching":
         payload = run_matching_payload(db_path, user_id=user_id, only_active_listings=only_active_listings)
-        title = "Matching Complete"
-        summary_bits = [
-            f"user <code>{html.escape(user_id)}</code>",
-            f"active only <code>{str(only_active_listings).lower()}</code>",
-            f"matched <code>{html.escape(str(((payload.get('result') or {}).get('matches_upserted') or 0)))}</code>",
-        ]
-        links_html = "".join(
-            [
-                f'<a href="/matches?user_id={quote(user_id)}">Open opportunities</a>',
-                f'<a href="/api/users/{quote(user_id)}/matches">Matches JSON</a>',
-                f'<a href="/actions?user_id={quote(user_id)}">Back to actions</a>',
-            ]
+        title = "Matches refreshed"
+        touched = html.escape(str(((payload.get("result") or {}).get("matches_upserted") or 0)))
+        scope_copy = (
+            "Only auctions that were still eligible to bid on were scanned."
+            if only_active_listings
+            else "Ended listings stayed in the dataset so you can compare past sales."
         )
+        summary_html = (
+            f'<p>Wrote <strong>{touched}</strong> refreshed match rows. {html.escape(scope_copy)}</p>'
+            f"<p class=\"signal-note\">This can take up to a minute on large catalogs—results are visible on the Matches page.</p>"
+        )
+        anchors = [
+            f'<a class="action-button" href="/matches?user_id={quote(user_id)}">Open matches</a>',
+            f'<a href="/?user_id={quote(user_id)}">Dashboard</a>',
+            f'<a href="/actions?user_id={quote(user_id)}">Settings &amp; refresh</a>',
+        ]
+        if show_app_dev_ui():
+            anchors.append(f'<a href="/api/users/{quote(user_id)}/matches">Matches JSON</a>')
+        links_html = f'<div class="detail-row hero-actions">{"".join(anchors)}</div>'
     elif action_name == "signals":
         payload = run_signals_payload(db_path, user_id=user_id, lookback_hours=lookback_hours)
         result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-        title = "Signals Complete"
-        summary_bits = [
-            f"user <code>{html.escape(user_id)}</code>",
-            f"lookback <code>{lookback_hours}h</code>",
-            f"inserted <code>{html.escape(str(result.get('inserted') or 0))}</code>",
-            f"updated <code>{html.escape(str(result.get('updated') or 0))}</code>",
+        title = "Alerts refreshed"
+        ins = html.escape(str(result.get("inserted") or 0))
+        upd = html.escape(str(result.get("updated") or 0))
+        summary_html = f"""<p>Generated <strong>{ins}</strong> new alerts and updated <strong>{upd}</strong> existing ones.</p><p class="signal-note">Window: last <strong>{html.escape(str(lookback_hours))}h</strong> of activity.</p>"""
+        anchors = [
+            f'<a class="action-button" href="/?user_id={quote(user_id)}#signals">Open alerts inbox</a>',
+            f'<a href="/actions?user_id={quote(user_id)}">Settings &amp; refresh</a>',
+            f'<a href="/?user_id={quote(user_id)}">Dashboard</a>',
         ]
-        links_html = "".join(
-            [
-                f'<a href="/?user_id={quote(user_id)}#signals">Open dashboard signals</a>',
-                f'<a href="/api/users/{quote(user_id)}/signals">Signals JSON</a>',
-                f'<a href="/actions?user_id={quote(user_id)}">Back to actions</a>',
-            ]
-        )
+        if show_app_dev_ui():
+            anchors.append(f'<a href="/api/users/{quote(user_id)}/signals">Alerts JSON</a>')
+        links_html = f'<div class="detail-row hero-actions">{"".join(anchors)}</div>'
     elif action_name == "digest":
         payload = run_digest_payload(db_path=db_path, reports_dir=reports_dir, user_id=user_id, lookback_hours=lookback_hours)
         report = payload.get("report") if isinstance(payload.get("report"), dict) else {}
-        title = "Digest Refreshed"
-        summary_bits = [
-            f"user <code>{html.escape(user_id)}</code>",
-            f"lookback <code>{lookback_hours}h</code>",
-            f"report <code>{html.escape(str(report.get('name') or '-'))}</code>",
-        ]
-        links_html = "".join(
-            [
-                f'<a href="{html.escape(str(report.get("rendered") or "/"))}">Open rendered digest</a>',
-                f'<a href="{html.escape(str(report.get("raw") or "/"))}">Open raw markdown</a>',
-                f'<a href="/actions?user_id={quote(user_id)}">Back to actions</a>',
-            ]
+        title = "Digest regenerated"
+        rname = html.escape(str(report.get("name") or "-"))
+        rendered_href = str(report.get("rendered") or "/")
+        raw_href = str(report.get("raw") or "/")
+        summary_html = (
+            f"<p>New digest file <strong>{rname}</strong> is ready to read.</p>"
+            f'<p class="signal-note">Covered roughly the last <strong>{html.escape(str(lookback_hours))}h</strong> worth of churn.</p>'
         )
+        anchors = [
+            f'<a class="action-button" href="{html.escape(rendered_href)}">Open readable digest</a>',
+            f'<a href="/actions?user_id={quote(user_id)}">Settings &amp; refresh</a>',
+            f'<a href="/?user_id={quote(user_id)}">Dashboard</a>',
+        ]
+        if show_app_dev_ui():
+            anchors.append(f'<a href="{html.escape(raw_href)}">Markdown source</a>')
+        links_html = f'<div class="detail-row hero-actions">{"".join(anchors)}</div>'
     else:
         raise ValueError("unknown action")
 
-    pretty_payload = html.escape(json.dumps(payload, ensure_ascii=False, indent=2))
-    summary_html = " | ".join(summary_bits)
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{html.escape(title)}</title>
-  <style>
-    :root {{
-      --bg: #f4ede1;
-      --panel: rgba(255, 250, 244, 0.88);
-      --panel-strong: #fff9f0;
-      --border: #decaae;
-      --ink: #1d2128;
-      --muted: #706658;
-      --accent: #8f3911;
-      --shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
-      margin: 0;
-      color: var(--ink);
-      background: linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
-    }}
-    main {{ max-width: 960px; margin: 0 auto; padding: 36px 20px 60px; }}
-    .panel {{
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 28px;
-      padding: 24px;
-      box-shadow: var(--shadow);
-      margin-bottom: 20px;
-    }}
-    h1 {{
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2rem, 4vw, 3rem);
-      letter-spacing: -0.04em;
-      margin: 0 0 10px;
-    }}
-    p {{ color: var(--muted); line-height: 1.6; }}
-    .link-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-top: 16px;
-    }}
-    pre {{
-      white-space: pre-wrap;
-      overflow-x: auto;
-      background: var(--panel-strong);
-      border: 1px solid var(--border);
-      border-radius: 20px;
-      padding: 18px;
-      font-family: "JetBrains Mono", "Cascadia Code", monospace;
-      font-size: 0.93rem;
-    }}
-    code {{
-      font-family: "JetBrains Mono", "Cascadia Code", monospace;
-      background: #efe4d4;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }}
-    a {{ color: var(--accent); text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-  </style>
-</head>
-<body>
-  <main>
-    <section class="panel">
-      <h1>{html.escape(title)}</h1>
-      <p>{summary_html}</p>
-      <div class="link-row">{links_html}</div>
+    dev_panel = ""
+    if show_app_dev_ui():
+        pretty_payload = html.escape(json.dumps(payload, ensure_ascii=False, indent=2))
+        dev_panel = (
+            '<section class="panel"><details class="dev-advanced"><summary>Advanced: raw response payload</summary>'
+            f"<pre>{pretty_payload}</pre></details></section>"
+        )
+
+    inner = f"""
+    <div class="detail-body">
+    <section class="panel hero page-hero">
+      <span class="eyebrow">{html.escape(title)}</span>
+      <h1>All set</h1>
+      {summary_html}
+      {links_html}
     </section>
-    <section class="panel">
-      <h2>Action Payload</h2>
-      <pre>{pretty_payload}</pre>
-    </section>
-  </main>
-</body>
-</html>"""
+    {dev_panel}
+    </div>
+    """
+    return render_document(
+        title=title,
+        html_lang=lang,
+        user_id=user_id,
+        nav_active="settings",
+        main_inner_html=inner.strip(),
+        main_classes="page-wide detail-body-wrap",
+        omit_glossary_footer=True,
+    )
 
 
 def render_interest_edit_html(
@@ -2349,127 +2208,26 @@ def render_interest_edit_html(
     policy = interest.get("signal_policy") if isinstance(interest.get("signal_policy"), dict) else {}
     primary_target = next((target for target in targets if isinstance(target, dict)), {})
     primary_holding = next((holding for holding in holdings if isinstance(holding, dict)), {})
-
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Edit Interest</title>
-  <style>
-    :root {{
-      --bg: #f4ede1;
-      --panel: rgba(255, 250, 244, 0.88);
-      --panel-strong: #fff9f0;
-      --border: #decaae;
-      --ink: #1d2128;
-      --muted: #706658;
-      --accent: #8f3911;
-      --accent-deep: #4e2513;
-      --shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
-      margin: 0;
-      color: var(--ink);
-      background: linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
-    }}
-    main {{ max-width: 900px; margin: 0 auto; padding: 36px 20px 60px; }}
-    .panel {{
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 28px;
-      padding: 24px;
-      box-shadow: var(--shadow);
-      margin-bottom: 20px;
-    }}
-    h1 {{
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2rem, 4vw, 3rem);
-      letter-spacing: -0.04em;
-      margin: 0 0 10px;
-    }}
-    p {{ color: var(--muted); line-height: 1.6; }}
-    .chip-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 16px;
-    }}
-    .chip {{
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      border-radius: 999px;
-      padding: 7px 11px;
-      background: #f1e0cb;
-      color: var(--accent);
-      font-size: 0.84rem;
-      font-weight: 600;
-      border: 1px solid var(--border);
-    }}
-    form {{
-      display: grid;
-      gap: 16px;
-    }}
-    .grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 14px;
-    }}
-    label {{
-      display: grid;
-      gap: 6px;
-      color: var(--muted);
-      font-size: 0.94rem;
-    }}
-    input, select, textarea, button {{
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 10px 12px;
-      font: inherit;
-      background: #fffdf8;
-      color: var(--ink);
-    }}
-    textarea {{
-      min-height: 120px;
-      resize: vertical;
-    }}
-    button {{
-      background: var(--accent);
-      color: #fff9f0;
-      font-weight: 700;
-      cursor: pointer;
-    }}
-    button:hover {{
-      background: var(--accent-deep);
-    }}
-    code {{
-      font-family: "JetBrains Mono", "Cascadia Code", monospace;
-      background: #efe4d4;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }}
-    a {{ color: var(--accent); text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-  </style>
-</head>
-<body>
-  <main>
-    <section class="panel">
+    lang = html_lang_attr(str(user.get("language") or ""))
+    tgt = html.escape(str(primary_target.get("target_label") or "-"))
+    hld = html.escape(str(primary_holding.get("raw_input") or primary_holding.get("normalized_name") or "none"))
+    inner = f"""
+    <div class="detail-body">
+    <section class="panel hero page-hero">
+      <span class="eyebrow">Edit saved interest</span>
       <h1>{html.escape(str(interest.get("interest_name") or "-"))}</h1>
-      <p>Edit the main operational knobs for this interest without leaving the browser.</p>
-      <div class="chip-row">
-        <span class="chip">User <code>{html.escape(str(user.get("id") or user_id))}</code></span>
-        <span class="chip">Target <code>{html.escape(str(primary_target.get("target_label") or "-"))}</code></span>
-        <span class="chip">Holding <code>{html.escape(str(primary_holding.get("raw_input") or primary_holding.get("normalized_name") or "none"))}</code></span>
-      </div>
+      <p>Update how aggressively we match, when we alert you, and any personal notes—without touching the API.</p>
+      <p class="signal-note">Primary target: <strong>{tgt}</strong> · Linked holding: <strong>{hld}</strong></p>
+      <details class="identity-advanced">
+        <summary>Account id</summary>
+        <p><code>{html.escape(str(user.get("id") or user_id))}</code></p>
+      </details>
     </section>
-    <section class="panel">
+    <section class="panel interest-detail-card form-panel">
       <form method="post" action="/interests/save">
         <input type="hidden" name="user_id" value="{html.escape(user_id)}">
         <input type="hidden" name="interest_id" value="{html.escape(interest_id)}">
+        <p class="form-fieldset-title">Basics</p>
         <div class="grid">
           <label>Priority
             <select name="interest_priority">
@@ -2477,9 +2235,14 @@ def render_interest_edit_html(
               {render_select_option('normal', str(interest.get('interest_priority') or ''), 'Normal')}
               {render_select_option('low', str(interest.get('interest_priority') or ''), 'Low')}
             </select>
+            <span class="field-help">Higher priority surfaces first in digests and dashboards.</span>
           </label>
+        </div>
+        <p class="form-fieldset-title">Targeting</p>
+        <div class="grid">
           <label>Budget max
             <input type="number" step="0.01" name="budget_max" value="{html.escape(str(primary_target.get('budget_max') or ''))}">
+            <span class="field-help">Optional ceiling for this target line.</span>
           </label>
           <label>Condition mode
             <select name="condition_mode">
@@ -2487,33 +2250,55 @@ def render_interest_edit_html(
               {render_select_option('prefer', str(primary_target.get('condition_mode') or ''), 'Prefer')}
               {render_select_option('require', str(primary_target.get('condition_mode') or ''), 'Require')}
             </select>
+            <span class="field-help">How strictly listing condition must line up with what you want.</span>
           </label>
+        </div>
+        <p class="form-fieldset-title">Alerts &amp; delivery</p>
+        <div class="grid">
           <label>Delivery mode
             <select name="delivery_mode">
               {render_select_option('immediate', str(policy.get('delivery_mode') or ''), 'Immediate')}
               {render_select_option('daily_digest', str(policy.get('delivery_mode') or ''), 'Daily digest')}
             </select>
+            <span class="field-help">Immediate feels like alerts; digest batches for calmer review.</span>
           </label>
           <label>Cooldown hours
             <input type="number" min="1" max="168" name="cooldown_hours" value="{html.escape(str(policy.get('cooldown_hours') or 24))}">
-          </label>
-          <label>Min match score
-            <input type="number" step="0.1" name="min_match_score" value="{html.escape(str(policy.get('min_match_score') or ''))}">
-          </label>
-          <label>Max signals per day
-            <input type="number" min="1" max="100" name="max_signals_per_day" value="{html.escape(str(policy.get('max_signals_per_day') or 5))}">
+            <span class="field-help">Minimum quiet time before the same alert can fire again.</span>
           </label>
         </div>
-        <label>Operator notes
+        <details class="subpanel subpanel-collapsible">
+          <summary><strong>Advanced alert tuning</strong></summary>
+          <div class="grid">
+            <label>Min match score
+              <input type="number" step="0.1" name="min_match_score" value="{html.escape(str(policy.get('min_match_score') or ''))}">
+              <span class="field-help">Higher = stricter matches, usually fewer alerts.</span>
+            </label>
+            <label>Max alerts per day
+              <input type="number" min="1" max="100" name="max_signals_per_day" value="{html.escape(str(policy.get('max_signals_per_day') or 5))}">
+              <span class="field-help">Safety valve so one interest cannot flood your inbox.</span>
+            </label>
+          </div>
+        </details>
+        <p class="form-fieldset-title">Notes</p>
+        <label>Personal notes
           <textarea name="interest_notes">{html.escape(str(interest.get("notes") or ""))}</textarea>
+          <span class="field-help">Why this interest exists, grading rules, or reminders for your future self.</span>
         </label>
-        <button type="submit">Save interest settings</button>
+        <button type="submit">Save changes</button>
       </form>
-      <p><a href="/interests?user_id={quote(user_id)}">Back to interests</a></p>
+      <p><a href="/interests?user_id={quote(user_id)}">Back to saved interests</a></p>
     </section>
-  </main>
-</body>
-</html>"""
+    </div>
+    """
+    return render_document(
+        title="Edit interest",
+        html_lang=lang,
+        user_id=user_id,
+        nav_active="interests",
+        main_inner_html=inner.strip(),
+        main_classes="page-wide detail-body-wrap",
+    )
 
 
 def render_interest_create_html(
@@ -2530,295 +2315,33 @@ def render_interest_create_html(
     default_delivery_mode = str(defaults.get("default_delivery_mode") or "daily_digest")
     default_cooldown = int(defaults.get("default_cooldown_hours") or 24)
     default_min_match_score = defaults.get("default_min_match_score") or 70
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Add Interest</title>
-  <style>
-    :root {{
-      --bg: #f4ede1;
-      --panel: rgba(255, 250, 244, 0.88);
-      --border: #decaae;
-      --ink: #1d2128;
-      --muted: #706658;
-      --accent: #8f3911;
-      --accent-deep: #4e2513;
-    }}
-    body {{
-      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
-      margin: 0;
-      color: var(--ink);
-      background: linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
-    }}
-    main {{ max-width: 980px; margin: 0 auto; padding: 36px 20px 60px; }}
-    .panel {{
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 28px;
-      padding: 24px;
-      box-shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
-      margin-bottom: 20px;
-    }}
-    h1 {{
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2rem, 4vw, 3rem);
-      letter-spacing: -0.04em;
-      margin: 0 0 10px;
-    }}
-    p {{ color: var(--muted); line-height: 1.6; }}
-    .chip-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 16px;
-    }}
-    .chip {{
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      border-radius: 999px;
-      padding: 7px 11px;
-      background: #f1e0cb;
-      color: var(--accent);
-      font-size: 0.84rem;
-      font-weight: 600;
-      border: 1px solid var(--border);
-    }}
-    .preset-grid, .guide-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 14px;
-      margin-top: 16px;
-    }}
-    .preset-card, .guide-card {{
-      background: #fffaf3;
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 16px;
-      box-shadow: 0 14px 36px rgba(91, 58, 20, 0.07);
-    }}
-    .preset-card h3, .guide-card h3 {{
-      margin: 0 0 8px;
-      color: var(--accent-deep);
-      font-size: 1rem;
-    }}
-    .preset-card p, .guide-card p {{
-      margin: 0 0 10px;
-      font-size: 0.93rem;
-    }}
-    .preset-card button {{
-      width: 100%;
-      margin-top: 4px;
-    }}
-    form {{
-      display: grid;
-      gap: 16px;
-    }}
-    .grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 14px;
-    }}
-    label {{
-      display: grid;
-      gap: 6px;
-      color: var(--muted);
-      font-size: 0.94rem;
-    }}
-    .field-help {{
-      font-size: 0.84rem;
-      color: var(--muted);
-      line-height: 1.5;
-    }}
-    input, select, textarea, button {{
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 10px 12px;
-      font: inherit;
-      background: #fffdf8;
-      color: var(--ink);
-    }}
-    textarea {{
-      min-height: 120px;
-      resize: vertical;
-    }}
-    button {{
-      background: var(--accent);
-      color: #fff9f0;
-      font-weight: 700;
-      cursor: pointer;
-    }}
-    button:hover {{
-      background: var(--accent-deep);
-    }}
-    code {{
-      font-family: "JetBrains Mono", "Cascadia Code", monospace;
-      background: #efe4d4;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }}
-    .section-title {{
-      margin: 8px 0 4px;
-      font-weight: 700;
-      color: var(--accent-deep);
-      font-size: 1rem;
-    }}
-    a {{ color: var(--accent); text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-  </style>
-</head>
-<body>
-  <main>
-    <section class="panel">
-      <h1>Add Interest</h1>
-      <p>Create a new active interest, its first target, and its signal policy together. Start with a preset if you want the form to pick sane defaults for the most common collector workflows.</p>
-      <div class="chip-row">
-        <span class="chip">User <code>{html.escape(str(user.get("id") or user_id))}</code></span>
-        <span class="chip">Language <code>{html.escape(str(user.get("language") or "-"))}</code></span>
-        <span class="chip">Timezone <code>{html.escape(str(user.get("timezone") or "-"))}</code></span>
-      </div>
-      <div class="preset-grid">
-        <section class="preset-card">
-          <h3>Watch Buy</h3>
-          <p>For one exact item you want to buy quickly when it appears at a good level.</p>
-          <button type="button" onclick="applyInterestPreset('watch_buy_exact')">Use Watch Buy Preset</button>
-        </section>
-        <section class="preset-card">
-          <h3>Watch Sell</h3>
-          <p>For something you already hold and want exit signals when the market improves.</p>
-          <button type="button" onclick="applyInterestPreset('watch_sell_exit')">Use Watch Sell Preset</button>
-        </section>
-        <section class="preset-card">
-          <h3>Collecting</h3>
-          <p>For completing a set or family where related variants are still useful to see.</p>
-          <button type="button" onclick="applyInterestPreset('collecting_family')">Use Collecting Preset</button>
-        </section>
-        <section class="preset-card">
-          <h3>Discovery</h3>
-          <p>For broad market watching where you want a digest rather than immediate alerts.</p>
-          <button type="button" onclick="applyInterestPreset('discovery_series')">Use Discovery Preset</button>
-        </section>
-      </div>
-    </section>
-    <section class="panel">
-      <form method="post" action="/interests/create">
-        <input type="hidden" name="user_id" value="{html.escape(user_id)}">
-        <div class="section-title">Identity</div>
-        <div class="grid">
-          <label>Interest name
-            <input type="text" name="interest_name" placeholder="e.g. 红楼梦型张补仓" required>
-            <span class="field-help">What you want this track to be called in the dashboard and reports.</span>
-          </label>
-          <label>Raw target input
-            <input type="text" name="raw_input" placeholder="e.g. T69M红楼梦型张新" required>
-            <span class="field-help">Paste the exact listing-style title you care about. The service parses this into the target fields automatically.</span>
-          </label>
-        </div>
-        <div class="section-title">Matching Setup</div>
-        <div class="grid">
-          <label>Interest kind
-            <select name="interest_kind">
-              <option value="watch_buy">Watch buy</option>
-              <option value="watch_sell">Watch sell</option>
-              <option value="collecting">Collecting</option>
-              <option value="discovery">Discovery</option>
-              <option value="portfolio_monitor">Portfolio monitor</option>
-            </select>
-            <span class="field-help">Pick the job this interest is doing: buying, selling, collecting, or broad discovery.</span>
-          </label>
-          <label>Scope
-            <select name="scope_kind">
-              <option value="exact_item">Exact item</option>
-              <option value="issue_family">Issue family</option>
-              <option value="series">Series</option>
-              <option value="theme">Theme</option>
-              <option value="keyword">Keyword</option>
-            </select>
-            <span class="field-help">Narrow scopes are precise; broader scopes tolerate related material.</span>
-          </label>
-          <label>Precision
-            <select name="precision_mode">
-              {render_select_option('exact', default_precision_mode, 'Exact')}
-              {render_select_option('balanced', default_precision_mode, 'Balanced')}
-              {render_select_option('broad', default_precision_mode, 'Broad')}
-            </select>
-            <span class="field-help">Exact is strict, balanced is practical, broad is discovery-oriented.</span>
-          </label>
-          <label>Priority
-            <select name="interest_priority">
-              {render_select_option('high', default_priority, 'High')}
-              {render_select_option('normal', default_priority, 'Normal')}
-              {render_select_option('low', default_priority, 'Low')}
-            </select>
-            <span class="field-help">High-priority interests float to the top of the dashboard and reports.</span>
-          </label>
-          <label>Budget max
-            <input type="number" step="0.01" name="budget_max" value="">
-            <span class="field-help">Optional. If you leave this blank, the market will be watched without a hard cap.</span>
-          </label>
-          <label>Condition mode
-            <select name="condition_mode">
-              {render_select_option('ignore', default_condition_mode, 'Ignore')}
-              {render_select_option('prefer', default_condition_mode, 'Prefer')}
-              {render_select_option('require', default_condition_mode, 'Require')}
-            </select>
-            <span class="field-help">Use require if condition must match; prefer if it matters but should not fully block.</span>
-          </label>
-        </div>
-        <div class="section-title">Signal Policy</div>
-        <div class="grid">
-          <label>Delivery mode
-            <select name="delivery_mode">
-              {render_select_option('immediate', default_delivery_mode, 'Immediate')}
-              {render_select_option('daily_digest', default_delivery_mode, 'Daily digest')}
-              {render_select_option('silent_log', default_delivery_mode, 'Silent log')}
-            </select>
-            <span class="field-help">Immediate for alert-like behavior, digest for review-friendly batching.</span>
-          </label>
-          <label>Cooldown hours
-            <input type="number" min="1" max="168" name="cooldown_hours" value="{html.escape(str(default_cooldown))}">
-            <span class="field-help">How long the same signal should stay quiet before firing again.</span>
-          </label>
-          <label>Min match score
-            <input type="number" step="0.1" name="min_match_score" value="{html.escape(str(default_min_match_score))}">
-            <span class="field-help">Higher scores are stricter and quieter. Lower scores increase coverage.</span>
-          </label>
-          <label>Max signals per day
-            <input type="number" min="1" max="100" name="max_signals_per_day" value="8">
-            <span class="field-help">A simple cap to avoid flooding this one interest with too many alerts.</span>
-          </label>
-        </div>
-        <div class="section-title">Notes</div>
-        <label>Operator notes
-          <textarea name="interest_notes" placeholder="Why this interest exists, what matters, and any curation rules."></textarea>
-          <span class="field-help">These notes show up later on the interests page and help explain why this track exists.</span>
-        </label>
-        <button type="submit">Create interest</button>
-      </form>
-      <p><a href="/interests?user_id={quote(user_id)}">Back to interests</a></p>
-    </section>
-    <section class="panel">
-      <div class="guide-grid">
-        <section class="guide-card">
-          <h3>Good raw input examples</h3>
-          <p><code>T69M红楼梦型张新</code>, <code>T43西游记新全</code>, <code>2026年中国龙31.104克普制银币</code></p>
-        </section>
-        <section class="guide-card">
-          <h3>When to use broad scope</h3>
-          <p>Use <strong>series</strong>, <strong>theme</strong>, or <strong>keyword</strong> only when you want discovery coverage rather than exact targeting.</p>
-        </section>
-        <section class="guide-card">
-          <h3>Fastest safe default</h3>
-          <p>If you are unsure, use <strong>Watch Buy</strong> + <strong>Exact Item</strong> + <strong>Balanced</strong> and then refine after you see the first results.</p>
-        </section>
-      </div>
-    </section>
-  </main>
+    lang = html_lang_attr(str(user.get("language") or ""))
+    create_extra_css = """
+      .preset-grid, .guide-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 14px;
+        margin-top: 16px;
+      }
+      .preset-card, .guide-card {
+        background: var(--panel-soft);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 16px;
+        box-shadow: 0 14px 36px rgba(81, 60, 31, 0.06);
+      }
+      .preset-card h3, .guide-card h3 {
+        margin: 0 0 8px;
+        color: var(--accent-deep);
+        font-size: 1rem;
+      }
+      .preset-card p, .guide-card p { margin: 0 0 10px; font-size: 0.93rem; }
+      .preset-card button { width: 100%; margin-top: 4px; }
+    """
+    preset_script = """
   <script>
-    const presetDefinitions = {{
-      watch_buy_exact: {{
+    const presetDefinitions = {
+      watch_buy_exact: {
         interest_kind: "watch_buy",
         scope_kind: "exact_item",
         precision_mode: "exact",
@@ -2828,8 +2351,8 @@ def render_interest_create_html(
         cooldown_hours: "6",
         min_match_score: "90",
         max_signals_per_day: "6",
-      }},
-      watch_sell_exit: {{
+      },
+      watch_sell_exit: {
         interest_kind: "watch_sell",
         scope_kind: "exact_item",
         precision_mode: "exact",
@@ -2839,8 +2362,8 @@ def render_interest_create_html(
         cooldown_hours: "12",
         min_match_score: "88",
         max_signals_per_day: "4",
-      }},
-      collecting_family: {{
+      },
+      collecting_family: {
         interest_kind: "collecting",
         scope_kind: "issue_family",
         precision_mode: "balanced",
@@ -2850,8 +2373,8 @@ def render_interest_create_html(
         cooldown_hours: "12",
         min_match_score: "74",
         max_signals_per_day: "8",
-      }},
-      discovery_series: {{
+      },
+      discovery_series: {
         interest_kind: "discovery",
         scope_kind: "series",
         precision_mode: "broad",
@@ -2861,242 +2384,312 @@ def render_interest_create_html(
         cooldown_hours: "24",
         min_match_score: "58",
         max_signals_per_day: "20",
-      }},
-    }};
+      },
+    };
 
-    function applyInterestPreset(name) {{
+    function applyInterestPreset(name) {
       const preset = presetDefinitions[name];
-      if (!preset) {{
+      if (!preset) {
         return;
-      }}
-      for (const [fieldName, value] of Object.entries(preset)) {{
-        const field = document.querySelector(`[name="${{fieldName}}"]`);
-        if (field) {{
+      }
+      for (const [fieldName, value] of Object.entries(preset)) {
+        const field = document.querySelector('[name="' + fieldName + '"]');
+        if (field) {
           field.value = value;
-        }}
-      }}
-    }}
+        }
+      }
+    }
   </script>
-</body>
-</html>"""
 
+"""
+    inner = f"""
+    <div class="detail-body">
+    <section class="panel hero page-hero">
+      <span class="eyebrow">New saved interest</span>
+      <h1>Add an interest</h1>
+      <p>Name what you want to watch, paste a listing-style anchor, tune how wide the net should be, and choose alert pacing presets below if you prefer not to micromanage every field.</p>
+      <details class="identity-advanced">
+        <summary>Language &amp; account id</summary>
+        <p>{html.escape(str(user.get("language") or "-"))} · {html.escape(str(user.get("timezone") or "-"))}</p>
+        <p>Account id <code>{html.escape(str(user.get("id") or user_id))}</code></p>
+      </details>
+      <div class="preset-grid">
+        <section class="preset-card">
+          <h3>Watch Buy</h3>
+          <p>For one exact item you want to buy quickly when it appears at a good level.</p>
+          <button type="button" onclick="applyInterestPreset('watch_buy_exact')">Use Watch Buy preset</button>
+        </section>
+        <section class="preset-card">
+          <h3>Watch Sell</h3>
+          <p>For something you already hold and want exit signals when the market improves.</p>
+          <button type="button" onclick="applyInterestPreset('watch_sell_exit')">Use Watch Sell preset</button>
+        </section>
+        <section class="preset-card">
+          <h3>Collecting</h3>
+          <p>For completing a set or family where related variants are still useful to see.</p>
+          <button type="button" onclick="applyInterestPreset('collecting_family')">Use Collecting preset</button>
+        </section>
+        <section class="preset-card">
+          <h3>Discovery</h3>
+          <p>For broad market watching where you want a digest rather than immediate alerts.</p>
+          <button type="button" onclick="applyInterestPreset('discovery_series')">Use Discovery preset</button>
+        </section>
+      </div>
+    </section>
+    <section class="panel interest-detail-card form-panel">
+      <form method="post" action="/interests/create">
+        <input type="hidden" name="user_id" value="{html.escape(user_id)}">
+        <p class="form-fieldset-title">Basics</p>
+        <div class="grid">
+          <label>Interest name
+            <input type="text" name="interest_name" placeholder="e.g. 红楼梦型张补仓" required>
+            <span class="field-help">Shows up across the dashboard and digests.</span>
+          </label>
+          <label>Listing-style target text
+            <input type="text" name="raw_input" placeholder="e.g. T69M红楼梦型张新" required>
+            <span class="field-help">Paste wording like a marketplace title; we derive structured targets automatically.</span>
+          </label>
+        </div>
+        <p class="form-fieldset-title">Targeting &amp; matching</p>
+        <div class="grid">
+          <label>Interest intent
+            <select name="interest_kind">
+              <option value="watch_buy">Watch buy</option>
+              <option value="watch_sell">Watch sell</option>
+              <option value="collecting">Collecting</option>
+              <option value="discovery">Discovery</option>
+              <option value="portfolio_monitor">Portfolio monitor</option>
+            </select>
+            <span class="field-help">What job this saved interest performs for you.</span>
+          </label>
+          <label>Scope width
+            <select name="scope_kind">
+              <option value="exact_item">Exact item</option>
+              <option value="issue_family">Issue family</option>
+              <option value="series">Series</option>
+              <option value="theme">Theme</option>
+              <option value="keyword">Keyword</option>
+            </select>
+            <span class="field-help">Narrow scopes are precise; broader ones include related variants.</span>
+          </label>
+          <label>Precision
+            <select name="precision_mode">
+              {render_select_option('exact', default_precision_mode, 'Exact')}
+              {render_select_option('balanced', default_precision_mode, 'Balanced')}
+              {render_select_option('broad', default_precision_mode, 'Broad')}
+            </select>
+            <span class="field-help">How strict fuzzy matching should be overall.</span>
+          </label>
+          <label>Priority
+            <select name="interest_priority">
+              {render_select_option('high', default_priority, 'High')}
+              {render_select_option('normal', default_priority, 'Normal')}
+              {render_select_option('low', default_priority, 'Low')}
+            </select>
+            <span class="field-help">Higher priority floats to the top of summaries.</span>
+          </label>
+          <label>Budget max
+            <input type="number" step="0.01" name="budget_max" value="">
+            <span class="field-help">Optional ceiling for affordability checks.</span>
+          </label>
+          <label>Condition stance
+            <select name="condition_mode">
+              {render_select_option('ignore', default_condition_mode, 'Ignore')}
+              {render_select_option('prefer', default_condition_mode, 'Prefer')}
+              {render_select_option('require', default_condition_mode, 'Require')}
+            </select>
+            <span class="field-help">How listing condition grading should influence matches.</span>
+          </label>
+        </div>
+        <p class="form-fieldset-title">Alerts &amp; pacing</p>
+        <div class="grid">
+          <label>Delivery rhythm
+            <select name="delivery_mode">
+              {render_select_option('immediate', default_delivery_mode, 'Immediate')}
+              {render_select_option('daily_digest', default_delivery_mode, 'Daily digest')}
+              {render_select_option('silent_log', default_delivery_mode, 'Silent log')}
+            </select>
+            <span class="field-help">Immediate feels like pings; digest batches quieter review.</span>
+          </label>
+          <label>Cooldown hours
+            <input type="number" min="1" max="168" name="cooldown_hours" value="{html.escape(str(default_cooldown))}">
+            <span class="field-help">Minimum quiet window before repeating the same notice.</span>
+          </label>
+        </div>
+        <details class="subpanel subpanel-collapsible">
+          <summary><strong>Advanced alert thresholds</strong></summary>
+          <div class="grid">
+            <label>Min match score
+              <input type="number" step="0.1" name="min_match_score" value="{html.escape(str(default_min_match_score))}">
+              <span class="field-help">Raise for fewer, sharper hits; lower to widen coverage.</span>
+            </label>
+            <label>Max alerts per day
+              <input type="number" min="1" max="100" name="max_signals_per_day" value="8">
+              <span class="field-help">Keeps one interest from overwhelming your inbox.</span>
+            </label>
+          </div>
+        </details>
+        <p class="form-fieldset-title">Notes</p>
+        <label>Personal notes
+          <textarea name="interest_notes" placeholder="Personal reminders, grading rules, or why this matters."></textarea>
+          <span class="field-help">Visible on saved-interest cards alongside operational stats.</span>
+        </label>
+        <button type="submit">Create interest</button>
+      </form>
+      <p><a href="/interests?user_id={quote(user_id)}">Back to saved interests</a></p>
+    </section>
+    <section class="panel">
+      <span class="eyebrow">Quick tips</span>
+      <div class="guide-grid">
+        <section class="guide-card">
+          <h3>Good anchor text</h3>
+          <p><code>T69M红楼梦型张新</code>, <code>T43西游记新全</code>, <code>2026年中国龙31.104克普制银币</code></p>
+        </section>
+        <section class="guide-card">
+          <h3>Broad scopes</h3>
+          <p>Use <strong>series</strong>, <strong>theme</strong>, or <strong>keyword</strong> when exploration beats pinpoint accuracy.</p>
+        </section>
+        <section class="guide-card">
+          <h3>Starter combo</h3>
+          <p>Unsure? Try <strong>Watch buy</strong> + <strong>Exact item</strong> + <strong>Balanced</strong>, refresh matches, then refine.</p>
+        </section>
+      </div>
+    </section>
+    </div>
+    """
+    return render_document(
+        title="Add saved interest",
+        html_lang=lang,
+        user_id=user_id,
+        nav_active="interests",
+        main_inner_html=inner.strip(),
+        main_classes="page-wide detail-body-wrap",
+        extra_css=create_extra_css.strip(),
+        body_suffix_html=preset_script.strip(),
+    )
 
 def render_interest_save_result_html(
     *,
+    db_path: Path,
     payload: dict[str, object],
     user_id: str,
     interest_id: str,
 ) -> str:
+    lang = profile_html_lang(db_path, user_id=user_id)
     interest = payload.get("interest") if isinstance(payload.get("interest"), dict) else {}
     summary = interest.get("summary") if isinstance(interest.get("summary"), dict) else {}
     refresh = payload.get("refresh") if isinstance(payload.get("refresh"), dict) else {}
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Interest Saved</title>
-  <style>
-    body {{
-      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
-      margin: 0;
-      color: #1d2128;
-      background: linear-gradient(180deg, #f8f2ea 0%, #f4ede1 100%);
-    }}
-    main {{ max-width: 900px; margin: 0 auto; padding: 36px 20px 60px; }}
-    .panel {{
-      background: rgba(255, 250, 244, 0.88);
-      border: 1px solid #decaae;
-      border-radius: 28px;
-      padding: 24px;
-      box-shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
-      margin-bottom: 20px;
-    }}
-    h1 {{
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2rem, 4vw, 3rem);
-      letter-spacing: -0.04em;
-      margin: 0 0 10px;
-    }}
-    p {{ color: #706658; line-height: 1.6; }}
-    .link-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-top: 16px;
-    }}
-    a {{ color: #8f3911; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    code {{
-      font-family: "JetBrains Mono", "Cascadia Code", monospace;
-      background: #efe4d4;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }}
-  </style>
-</head>
-<body>
-  <main>
-    <section class="panel">
-      <h1>Interest Saved</h1>
-      <p><code>{html.escape(str(interest.get("interest_name") or interest_id))}</code> was updated successfully.</p>
-      <p>Signals <strong>{html.escape(str(summary.get("active_signal_count") or 0))}</strong> | matches <strong>{html.escape(str(summary.get("active_match_count") or 0))}</strong> | updated at <code>{html.escape(str(payload.get("updated_at") or "-"))}</code></p>
+    iname = html.escape(str(interest.get("interest_name") or interest_id))
+    inner = f"""
+    <div class="detail-body">
+    <section class="panel hero page-hero">
+      <span class="eyebrow">Saved</span>
+      <h1>Interest updated</h1>
+      <p><strong>{iname}</strong> was saved successfully.</p>
+      <p>Active alerts <strong>{html.escape(str(summary.get("active_signal_count") or 0))}</strong> ·
+      live matches <strong>{html.escape(str(summary.get("active_match_count") or 0))}</strong></p>
+      <p class="signal-note">Last saved timestamp <code>{html.escape(str(payload.get("updated_at") or "-"))}</code></p>
       {render_interest_refresh_summary(refresh, user_id=user_id)}
-      <div class="link-row">
-        <a href="/interests/edit?user_id={quote(user_id)}&interest_id={quote(interest_id)}">Keep editing</a>
-        <a href="/interests?user_id={quote(user_id)}">Back to interests</a>
-        <a href="/?user_id={quote(user_id)}">Back to dashboard</a>
+      <div class="detail-row hero-actions">
+        <a class="action-button" href="/interests/edit?user_id={quote(user_id)}&interest_id={quote(interest_id)}">Keep editing</a>
+        <a href="/interests?user_id={quote(user_id)}">Saved interests</a>
+        <a href="/?user_id={quote(user_id)}">Dashboard</a>
       </div>
     </section>
-  </main>
-</body>
-</html>"""
+    </div>
+    """
+    return render_document(
+        title="Interest saved",
+        html_lang=lang,
+        user_id=user_id,
+        nav_active="interests",
+        main_inner_html=inner.strip(),
+        main_classes="page-wide detail-body-wrap",
+        omit_glossary_footer=True,
+    )
 
 
 def render_interest_create_result_html(
     *,
+    db_path: Path,
     payload: dict[str, object],
     user_id: str,
 ) -> str:
+    lang = profile_html_lang(db_path, user_id=user_id)
     interest = payload.get("interest") if isinstance(payload.get("interest"), dict) else {}
     summary = interest.get("summary") if isinstance(interest.get("summary"), dict) else {}
     interest_id = str(interest.get("id") or "")
     refresh = payload.get("refresh") if isinstance(payload.get("refresh"), dict) else {}
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Interest Created</title>
-  <style>
-    body {{
-      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
-      margin: 0;
-      color: #1d2128;
-      background: linear-gradient(180deg, #f8f2ea 0%, #f4ede1 100%);
-    }}
-    main {{ max-width: 900px; margin: 0 auto; padding: 36px 20px 60px; }}
-    .panel {{
-      background: rgba(255, 250, 244, 0.88);
-      border: 1px solid #decaae;
-      border-radius: 28px;
-      padding: 24px;
-      box-shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
-      margin-bottom: 20px;
-    }}
-    h1 {{
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2rem, 4vw, 3rem);
-      letter-spacing: -0.04em;
-      margin: 0 0 10px;
-    }}
-    p {{ color: #706658; line-height: 1.6; }}
-    .link-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-top: 16px;
-    }}
-    a {{ color: #8f3911; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    code {{
-      font-family: "JetBrains Mono", "Cascadia Code", monospace;
-      background: #efe4d4;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }}
-  </style>
-</head>
-<body>
-  <main>
-    <section class="panel">
-      <h1>Interest Created</h1>
-      <p><code>{html.escape(str(interest.get("interest_name") or interest_id))}</code> was created successfully.</p>
-      <p>Signals <strong>{html.escape(str(summary.get("active_signal_count") or 0))}</strong> | matches <strong>{html.escape(str(summary.get("active_match_count") or 0))}</strong> | created at <code>{html.escape(str(payload.get("created_at") or "-"))}</code></p>
-      <p>The new interest is active immediately, and the service already refreshed matching + signals for this user.</p>
+    iname = html.escape(str(interest.get("interest_name") or interest_id))
+    inner = f"""
+    <div class="detail-body">
+    <section class="panel hero page-hero">
+      <span class="eyebrow">Created</span>
+      <h1>New interest ready</h1>
+      <p><strong>{iname}</strong> is live—matching and alerts were regenerated automatically.</p>
+      <p>Active alerts <strong>{html.escape(str(summary.get("active_signal_count") or 0))}</strong> ·
+      live matches <strong>{html.escape(str(summary.get("active_match_count") or 0))}</strong></p>
+      <p class="signal-note">Created at <code>{html.escape(str(payload.get("created_at") or "-"))}</code></p>
       {render_interest_refresh_summary(refresh, user_id=user_id)}
-      <div class="link-row">
-        <a href="/interests/edit?user_id={quote(user_id)}&interest_id={quote(interest_id)}">Edit this interest</a>
-        <a href="/actions?user_id={quote(user_id)}">Open actions</a>
-        <a href="/interests?user_id={quote(user_id)}">Back to interests</a>
-        <a href="/?user_id={quote(user_id)}">Back to dashboard</a>
+      <div class="detail-row hero-actions">
+        <a class="action-button" href="/interests/edit?user_id={quote(user_id)}&interest_id={quote(interest_id)}">Fine-tune</a>
+        <a href="/actions?user_id={quote(user_id)}">Settings &amp; refresh</a>
+        <a href="/interests?user_id={quote(user_id)}">Saved interests</a>
+        <a href="/?user_id={quote(user_id)}">Dashboard</a>
       </div>
     </section>
-  </main>
-</body>
-</html>"""
+    </div>
+    """
+    return render_document(
+        title="Interest created",
+        html_lang=lang,
+        user_id=user_id,
+        nav_active="interests",
+        main_inner_html=inner.strip(),
+        main_classes="page-wide detail-body-wrap",
+        omit_glossary_footer=True,
+    )
 
 
 def render_interest_delete_result_html(
     *,
+    db_path: Path,
     payload: dict[str, object],
     user_id: str,
 ) -> str:
+    lang = profile_html_lang(db_path, user_id=user_id)
     interest = payload.get("interest") if isinstance(payload.get("interest"), dict) else {}
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     refresh = payload.get("refresh") if isinstance(payload.get("refresh"), dict) else {}
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Interest Removed</title>
-  <style>
-    body {{
-      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
-      margin: 0;
-      color: #1d2128;
-      background: linear-gradient(180deg, #f8f2ea 0%, #f4ede1 100%);
-    }}
-    main {{ max-width: 900px; margin: 0 auto; padding: 36px 20px 60px; }}
-    .panel {{
-      background: rgba(255, 250, 244, 0.88);
-      border: 1px solid #decaae;
-      border-radius: 28px;
-      padding: 24px;
-      box-shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
-      margin-bottom: 20px;
-    }}
-    h1 {{
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2rem, 4vw, 3rem);
-      letter-spacing: -0.04em;
-      margin: 0 0 10px;
-    }}
-    p {{ color: #706658; line-height: 1.6; }}
-    .link-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-top: 16px;
-    }}
-    a {{ color: #8f3911; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    code {{
-      font-family: "JetBrains Mono", "Cascadia Code", monospace;
-      background: #efe4d4;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }}
-  </style>
-</head>
-<body>
-  <main>
-    <section class="panel">
-      <h1>Interest Removed</h1>
-      <p><code>{html.escape(str(interest.get("interest_name") or "-"))}</code> was moved out of the active set.</p>
-      <p>The linked target was deactivated, and any active matches/signals attached to it were marked inactive so the dashboard stays honest.</p>
-      <p>Remaining active interests <strong>{html.escape(str(summary.get("active_interest_count") or 0))}</strong> | active targets <strong>{html.escape(str(summary.get("active_target_count") or 0))}</strong> | removed at <code>{html.escape(str(payload.get("deleted_at") or "-"))}</code></p>
+    iname = html.escape(str(interest.get("interest_name") or "-"))
+    inner = f"""
+    <div class="detail-body">
+    <section class="panel hero page-hero">
+      <span class="eyebrow">Removed</span>
+      <h1>Interest retired</h1>
+      <p><strong>{iname}</strong> is no longer monitored.</p>
+      <p>Linked targets paused and related matches/alerts now read as inactive so counts stay truthful.</p>
+      <p>Remaining saved interests <strong>{html.escape(str(summary.get("active_interest_count") or 0))}</strong> ·
+      targets <strong>{html.escape(str(summary.get("active_target_count") or 0))}</strong></p>
+      <p class="signal-note">Removed at <code>{html.escape(str(payload.get("deleted_at") or "-"))}</code></p>
       {render_interest_refresh_summary(refresh, user_id=user_id)}
-      <div class="link-row">
-        <a href="/interests/new?user_id={quote(user_id)}">Add another interest</a>
-        <a href="/interests?user_id={quote(user_id)}">Back to interests</a>
-        <a href="/?user_id={quote(user_id)}">Back to dashboard</a>
+      <div class="detail-row hero-actions">
+        <a class="action-button" href="/interests/new?user_id={quote(user_id)}">Add another</a>
+        <a href="/interests?user_id={quote(user_id)}">Saved interests</a>
+        <a href="/?user_id={quote(user_id)}">Dashboard</a>
       </div>
     </section>
-  </main>
-</body>
-</html>"""
+    </div>
+    """
+    return render_document(
+        title="Interest removed",
+        html_lang=lang,
+        user_id=user_id,
+        nav_active="interests",
+        main_inner_html=inner.strip(),
+        main_classes="page-wide detail-body-wrap",
+        omit_glossary_footer=True,
+    )
 
 
 def render_interest_refresh_summary(refresh: dict[str, object], *, user_id: str) -> str:
@@ -3104,16 +2697,23 @@ def render_interest_refresh_summary(refresh: dict[str, object], *, user_id: str)
     signals = refresh.get("signals") if isinstance(refresh.get("signals"), dict) else {}
     matching_result = matching.get("result") if isinstance(matching.get("result"), dict) else {}
     signals_result = signals.get("result") if isinstance(signals.get("result"), dict) else {}
+    api_bit = ""
+    if show_app_dev_ui():
+        api_bit = (
+            f'<p class="signal-note">Developer: '
+            f'<a href="/api/users/{quote(user_id)}/signals">Alerts JSON</a> · '
+            f'<a href="/api/users/{quote(user_id)}/matches">Matches JSON</a></p>'
+        )
     return f"""
-      <p>Auto refresh completed: matches upserted <strong>{html.escape(str(matching_result.get("matches_upserted") or 0))}</strong> |
-      signals inserted <strong>{html.escape(str(signals_result.get("inserted") or 0))}</strong> |
-      signals updated <strong>{html.escape(str(signals_result.get("updated") or 0))}</strong> |
-      signals deactivated <strong>{html.escape(str(signals_result.get("deactivated") or 0))}</strong>.</p>
-      <div class="link-row">
-        <a href="/matches?user_id={quote(user_id)}">Open opportunities</a>
-        <a href="/api/users/{quote(user_id)}/signals">Signals JSON</a>
-        <a href="/api/users/{quote(user_id)}/matches">Matches JSON</a>
+      <p>Background refresh finished: listings matched or updated <strong>{html.escape(str(matching_result.get("matches_upserted") or 0))}</strong> ·
+      new alerts <strong>{html.escape(str(signals_result.get("inserted") or 0))}</strong> ·
+      refreshed alerts <strong>{html.escape(str(signals_result.get("updated") or 0))}</strong> ·
+      cleared stale alerts <strong>{html.escape(str(signals_result.get("deactivated") or 0))}</strong>.</p>
+      <div class="detail-row hero-actions">
+        <a href="/matches?user_id={quote(user_id)}">See matches</a>
+        <a href="/?user_id={quote(user_id)}#signals">Open alerts inbox</a>
       </div>
+      {api_bit}
     """
 
 
@@ -3141,7 +2741,6 @@ def render_dashboard_html(
     )
     user = profile_payload["user"]
     summary = profile_payload["summary"]
-    signal_summary = signals_payload["summary"]
     latest_cards_html = render_latest_dashboard_cards(reports_payload)
     signals_inbox_html = render_signals_inbox(
         signals_payload,
@@ -3153,477 +2752,157 @@ def render_dashboard_html(
         render_opportunity_group_card(group, user_id=user_id)
         for group in top_opportunity_groups
         if isinstance(group, dict)
-    ) or '<p class="empty-state">No opportunity groups available yet.</p>'
+    )
+    if not opportunity_cards_html.strip():
+        opportunity_cards_html = (
+            '<p class="empty-state">No grouped matches yet.</p>'
+            f'<p class="empty-cta"><a href="/actions?user_id={quote(user_id)}">Refresh matches</a> · '
+            f'<a href="/interests?user_id={quote(user_id)}">Review saved interests</a></p>'
+        )
     digest_preview = render_digest_preview(str(digest_payload["markdown"]))
     latest_digest = digest_payload.get("report") if isinstance(digest_payload.get("report"), dict) else {}
     latest_map = reports_payload.get("latest") if isinstance(reports_payload.get("latest"), dict) else {}
     latest_signal_review = latest_map.get("signal_review") if isinstance(latest_map.get("signal_review"), dict) else None
     latest_daily_review = latest_map.get("daily_review") if isinstance(latest_map.get("daily_review"), dict) else None
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Collector Dashboard</title>
-  <style>
-    :root {{
-      --bg: #f8f5ef;
-      --panel: rgba(255, 255, 255, 0.92);
-      --panel-strong: #ffffff;
-      --panel-soft: #fcf8f1;
-      --border: #e8dbc7;
-      --ink: #1f2430;
-      --muted: #686258;
-      --accent: #a34a1e;
-      --accent-soft: #f4e6d5;
-      --accent-deep: #6d2f13;
-      --shadow: 0 18px 44px rgba(81, 60, 31, 0.08);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
-      margin: 0;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at top left, rgba(194, 141, 74, 0.12), transparent 18%),
-        radial-gradient(circle at 88% 0%, rgba(133, 96, 57, 0.08), transparent 18%),
-        linear-gradient(180deg, #fbf8f3 0%, var(--bg) 100%);
-    }}
-    main {{ max-width: 1160px; margin: 0 auto; padding: 28px 20px 56px; }}
-    h1, h2, h3 {{ margin: 0 0 10px; }}
-    nav {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-bottom: 16px;
-    }}
-    nav a {{
-      padding: 8px 14px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.78);
-      color: var(--muted);
-      font-size: 0.92rem;
-    }}
-    .hero {{
-      background: linear-gradient(135deg, rgba(255, 251, 245, 0.98), rgba(246, 236, 219, 0.9));
-      border: 1px solid var(--border);
-      border-radius: 26px;
-      padding: 24px;
-      box-shadow: var(--shadow);
-      margin-bottom: 18px;
-    }}
-    .hero h1 {{
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2.2rem, 4vw, 3.5rem);
-      letter-spacing: -0.04em;
-    }}
-    .hero p {{
-      color: var(--muted);
-      max-width: 660px;
-      font-size: 1.04rem;
-      line-height: 1.55;
-      margin: 0;
-    }}
-    .eyebrow {{
-      text-transform: uppercase;
-      letter-spacing: 0.14em;
-      font-size: 0.78rem;
-      color: var(--muted);
-    }}
-    .hero-grid {{
-      display: grid;
-      grid-template-columns: minmax(0, 1.3fr) minmax(260px, 0.8fr);
-      gap: 18px;
-      align-items: start;
-    }}
-    .hero-side {{
-      background: rgba(255, 255, 255, 0.72);
-      border: 1px solid var(--border);
-      border-radius: 20px;
-      padding: 18px;
-    }}
-    .hero-side h3 {{
-      font-family: Georgia, "Times New Roman", serif;
-      margin-bottom: 6px;
-    }}
-    .chip-row {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }}
-    .chip {{
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      border-radius: 999px;
-      padding: 8px 12px;
-      background: rgba(255, 255, 255, 0.82);
-      border: 1px solid var(--border);
-      color: var(--muted);
-      font-size: 0.94rem;
-    }}
-    .subtle-links {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 14px;
-    }}
-    .summary-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 14px;
-      margin: 0 0 18px;
-    }}
-    .summary-card {{
-      background: var(--panel-strong);
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 18px;
-      box-shadow: var(--shadow);
-    }}
-    .summary-card strong {{
-      display: block;
-      font-size: 1.9rem;
-      font-family: Georgia, "Times New Roman", serif;
-      color: var(--accent-deep);
-      margin-top: 8px;
-    }}
-    .spotlight-grid {{
-      display: grid;
-      grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.95fr);
-      gap: 18px;
-      margin-bottom: 18px;
-    }}
-    .quick-grid {{
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-    }}
-    .quick-card {{
-      background: var(--panel-soft);
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 16px;
-      display: grid;
-      gap: 8px;
-      box-shadow: var(--shadow);
-    }}
-    .quick-card h3 {{
-      font-size: 1rem;
-      margin-bottom: 0;
-    }}
-    .quick-card p {{
-      margin: 0;
-      color: var(--muted);
-      line-height: 1.45;
-      font-size: 0.96rem;
-    }}
-    .grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 14px;
-      margin-bottom: 0;
-    }}
-    .latest-card {{
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      padding: 16px;
-      background: var(--panel-strong);
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      box-shadow: var(--shadow);
-      min-height: 132px;
-    }}
-    .latest-card strong {{ font-size: 1.1rem; line-height: 1.3; }}
-    .latest-card .meta {{ margin-top: auto; color: var(--muted); font-size: 0.92rem; }}
-    .section {{
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 22px;
-      padding: 20px;
-      margin-bottom: 18px;
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(10px);
-    }}
-    .section-header {{
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      gap: 12px;
-      margin-bottom: 16px;
-    }}
-    .section-header p {{ margin: 0; color: var(--muted); }}
-    .digest-card {{
-      background: linear-gradient(180deg, rgba(255, 253, 248, 0.98), rgba(250, 243, 232, 0.92));
-      border: 1px solid var(--border);
-      border-radius: 20px;
-      padding: 20px;
-      box-shadow: var(--shadow);
-      display: grid;
-      gap: 12px;
-    }}
-    .digest-card p {{
-      margin: 0;
-      color: var(--muted);
-      line-height: 1.65;
-    }}
-    .digest-meta {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-    }}
-    .opportunity-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 14px;
-    }}
-    .signal-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-      gap: 14px;
-    }}
-    .signal-card {{
-      background: var(--panel-strong);
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 18px;
-      box-shadow: var(--shadow);
-      display: grid;
-      gap: 10px;
-    }}
-    .signal-card h3 {{
-      margin: 0;
-      font-size: 1.08rem;
-      line-height: 1.35;
-    }}
-    .signal-card p {{
-      margin: 0;
-      color: var(--muted);
-      line-height: 1.55;
-    }}
-    .signal-meta {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }}
-    .signal-note {{
-      font-size: 0.94rem;
-      color: var(--muted);
-    }}
-    .signal-links {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 4px;
-    }}
-    .pill {{
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      border-radius: 999px;
-      padding: 6px 10px;
-      background: var(--accent-soft);
-      color: var(--accent);
-      font-size: 0.82rem;
-      font-weight: 600;
-    }}
-    a {{ color: var(--accent); text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    code {{
-      font-family: "JetBrains Mono", "Cascadia Code", monospace;
-      background: #efe4d4;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }}
-    .empty-state {{ color: var(--muted); margin: 0; }}
-    details.dev-tools {{
-      margin-top: 8px;
-      border-top: 1px solid var(--border);
-      padding-top: 16px;
-    }}
-    details.dev-tools summary {{
-      cursor: pointer;
-      color: var(--muted);
-      font-weight: 600;
-      margin-bottom: 12px;
-    }}
-    .developer-links {{
-      display: grid;
-      gap: 10px;
-      font-size: 0.95rem;
-      color: var(--muted);
-    }}
-    @media (max-width: 720px) {{
-      .hero-grid {{
-        grid-template-columns: 1fr;
-      }}
-      .spotlight-grid {{
-        grid-template-columns: 1fr;
-      }}
-      .quick-grid {{
-        grid-template-columns: 1fr;
-      }}
-    }}
-  </style>
-</head>
-<body>
-  <main>
-    <nav>
-      <a href="#overview">Overview</a>
-      <a href="#signals">Signals</a>
-      <a href="/matches?user_id={quote(user_id)}">Opportunities</a>
-      <a href="/interests?user_id={quote(user_id)}">Interests</a>
-      <a href="#digest">Digest</a>
-      <a href="#reports">Reports</a>
-      <a href="/actions?user_id={quote(user_id)}">Actions</a>
-    </nav>
+    lang = html_lang_attr(str(user.get("language") or ""))
+    dlinks = latest_digest.get("links") if isinstance(latest_digest.get("links"), dict) else {}
+    digest_primary = str(dlinks.get("rendered") or "#")
+    digest_raw = str(dlinks.get("raw") or "#")
+    digest_title = str(latest_digest.get("name") or "Read latest digest")
+    signal_review_link_html = ""
+    if isinstance(latest_signal_review, dict):
+        srl = latest_signal_review.get("links")
+        if isinstance(srl, dict) and srl.get("rendered"):
+            signal_review_link_html = (
+                f'<a href="{html.escape(str(srl["rendered"]))}">Latest alert roundup</a>'
+            )
+    daily_review_link_html = ""
+    if isinstance(latest_daily_review, dict):
+        drl = latest_daily_review.get("links")
+        if isinstance(drl, dict) and drl.get("rendered"):
+            daily_review_link_html = (
+                f'<a href="{html.escape(str(drl["rendered"]))}">Daily summary</a>'
+            )
+    digest_advanced_block = ""
+    if show_app_dev_ui():
+        digest_advanced_block = f"""
+        <details class="digest-advanced">
+          <summary>Developer: alternate formats</summary>
+          <p><a href="{html.escape(digest_raw)}">Raw markdown file</a></p>
+        </details>
+        """
+    main_inner = f"""
+    {render_dashboard_anchor_nav(user_id)}
     <section class="hero" id="overview">
       <div class="hero-grid">
         <div>
-          <span class="eyebrow">Collector Dashboard</span>
+          <span class="eyebrow">Your collector home</span>
           <h1>{html.escape(str(user["display_name"]))}</h1>
-          <p>A lighter command center for the collector: start with what matters now, then dive into signals, opportunities, interests, or operator actions only when you need them.</p>
-          <div class="chip-row">
-            <span class="chip">User <code>{html.escape(str(user["id"]))}</code></span>
-            <span class="chip">{html.escape(str(user["language"]))}</span>
-            <span class="chip">{html.escape(str(user["timezone"]))}</span>
-          </div>
+          <p>Alerts and live matches appear first. Use <strong>Saved interests</strong> to tune what we watch, and <strong>Settings &amp; refresh</strong> when you want to update data on demand.</p>
+          <details class="identity-advanced">
+            <summary>Account details</summary>
+            <p>Language {html.escape(str(user["language"]))} · Time zone {html.escape(str(user["timezone"]))}</p>
+            <p>Account id <code>{html.escape(str(user["id"]))}</code></p>
+          </details>
         </div>
         <aside class="hero-side">
-          <span class="eyebrow">Latest Digest</span>
-          <h3>{html.escape(str(latest_digest.get("timestamp_label") or "-"))}</h3>
-          <p><a href="{html.escape(str(latest_digest.get("links", {}).get("rendered") if isinstance(latest_digest.get("links"), dict) else '#'))}">{html.escape(str(latest_digest.get("name") or "Open latest digest"))}</a></p>
+          <span class="eyebrow">Daily digest</span>
+          <h3>{html.escape(str(latest_digest.get("timestamp_label") or "—"))}</h3>
+          <p><a class="action-button" style="display:inline-flex;margin-top:8px;" href="{html.escape(digest_primary)}">{html.escape(digest_title)}</a></p>
+          <p class="signal-note" style="margin-top:12px;">Editorial summary of recent activity. Full preview is below.</p>
           <div class="subtle-links">
-            <a href="{html.escape(str(latest_digest.get("links", {}).get("rendered") if isinstance(latest_digest.get("links"), dict) else '#'))}">Open digest</a>
-            <a href="/actions?user_id={quote(user_id)}">Run actions</a>
-            <a href="/matches?user_id={quote(user_id)}">Browse opportunities</a>
+            <a href="/matches?user_id={quote(user_id)}">Browse matches</a>
+            <a href="/actions?user_id={quote(user_id)}">Settings &amp; refresh</a>
           </div>
         </aside>
       </div>
     </section>
 
-    <section class="summary-grid" aria-label="Summary cards">
-      <article class="summary-card">
-        <span class="eyebrow">Active Interests</span>
-        <strong>{summary["active_interest_count"]}</strong>
-      </article>
-      <article class="summary-card">
-        <span class="eyebrow">Active Matches</span>
-        <strong>{summary["active_match_count"]}</strong>
-      </article>
-      <article class="summary-card">
-        <span class="eyebrow">Active Signals</span>
-        <strong>{summary["active_signal_count"]}</strong>
-      </article>
-      <article class="summary-card">
-        <span class="eyebrow">Tracked Holdings</span>
-        <strong>{summary["active_holding_count"]}</strong>
-      </article>
-    </section>
-
-    <section class="spotlight-grid">
-      <section class="section" id="digest">
-        <div class="section-header">
-          <div>
-            <h2>Latest Digest</h2>
-            <p>The quickest editorial read on what changed recently for this collector.</p>
-          </div>
-        </div>
-        <div class="digest-card">
-          <div class="digest-meta">
-            <span class="pill">{html.escape(str(latest_digest.get("label") or "Digest"))}</span>
-            <span class="pill">{html.escape(str(latest_digest.get("timestamp_label") or "-"))}</span>
-          </div>
-          <div>{digest_preview}</div>
-          <div class="subtle-links">
-            <a href="{html.escape(str(latest_digest.get("links", {}).get("rendered") if isinstance(latest_digest.get("links"), dict) else '#'))}">Rendered digest</a>
-            <a href="{html.escape(str(latest_digest.get("links", {}).get("raw") if isinstance(latest_digest.get("links"), dict) else '#'))}">Raw markdown</a>
-          </div>
-        </div>
-      </section>
-
-      <section class="section">
-        <div class="section-header">
-          <div>
-            <h2>Jump Back In</h2>
-            <p>Go straight to the next workflow instead of scanning every surface on one page.</p>
-          </div>
-        </div>
-        <div class="quick-grid">
-          <a class="quick-card" href="#signals">
-            <span class="eyebrow">Signals</span>
-            <h3>{html.escape(str(summary["active_signal_count"]))} active alerts</h3>
-            <p>{html.escape(str(signal_summary["high_count"]))} high urgency and {html.escape(str(signal_summary["recent_signal_count"]))} fresh in the last {lookback_hours} hours.</p>
-          </a>
-          <a class="quick-card" href="/matches?user_id={quote(user_id)}">
-            <span class="eyebrow">Opportunities</span>
-            <h3>{html.escape(str(len(top_opportunity_groups)))} top groups</h3>
-            <p>Open the full opportunities page for grouped live and preview matches.</p>
-          </a>
-          <a class="quick-card" href="/interests?user_id={quote(user_id)}">
-            <span class="eyebrow">Interests</span>
-            <h3>{html.escape(str(summary["active_interest_count"]))} active interests</h3>
-            <p>Manage targets, budgets, holdings, and signal policy without leaving the browser.</p>
-          </a>
-          <a class="quick-card" href="/actions?user_id={quote(user_id)}">
-            <span class="eyebrow">Operator Actions</span>
-            <h3>Run matching or signals</h3>
-            <p>Trigger matching, signal generation, or digest refresh when you need an immediate update.</p>
-          </a>
-        </div>
-      </section>
-    </section>
-
     <section class="section" id="signals">
       <div class="section-header">
         <div>
-          <h2>Signals To Review</h2>
-          <p>Only the top active alerts are shown here so the page stays scannable.</p>
+          <h2>Alerts to review</h2>
+          <p>Notices derived from your saved interests and the current market. We show a short list here; open <strong>Settings &amp; refresh</strong> to regenerate.</p>
         </div>
         <div class="subtle-links">
-          <a href="/actions?user_id={quote(user_id)}">Run signal refresh</a>
-          {f'<a href="{html.escape(str(latest_signal_review.get("links", {}).get("rendered")))}">Latest signal review</a>' if isinstance(latest_signal_review, dict) and isinstance(latest_signal_review.get("links"), dict) and latest_signal_review.get("links", {}).get("rendered") else ""}
+          <a href="/actions?user_id={quote(user_id)}">Update alerts</a>
+          {signal_review_link_html}
         </div>
       </div>
       {signals_inbox_html}
     </section>
 
-    <section class="section">
+    <section class="section" id="matches-preview">
       <div class="section-header">
         <div>
-          <h2>Top Opportunity Groups</h2>
-          <p>Keep the homepage focused on the best clusters, then open the dedicated page for the long tail.</p>
+          <h2>Top match groups</h2>
+          <p>Listings grouped by how closely they fit an interest. See the <strong>Matches</strong> page for the full list.</p>
         </div>
         <div class="subtle-links">
-          <a href="/matches?user_id={quote(user_id)}">View all opportunities</a>
+          <a href="/matches?user_id={quote(user_id)}">View all matches</a>
         </div>
       </div>
       <div class="opportunity-grid">{opportunity_cards_html}</div>
     </section>
 
-    <section class="section" id="reports">
+    <section class="summary-grid" aria-label="At a glance">
+      <article class="summary-card">
+        <span class="eyebrow">Saved interests</span>
+        <strong>{summary["active_interest_count"]}</strong>
+      </article>
+      <article class="summary-card">
+        <span class="eyebrow">Active matches</span>
+        <strong>{summary["active_match_count"]}</strong>
+      </article>
+      <article class="summary-card">
+        <span class="eyebrow">Active alerts</span>
+        <strong>{summary["active_signal_count"]}</strong>
+      </article>
+      <article class="summary-card">
+        <span class="eyebrow">Tracked holdings</span>
+        <strong>{summary["active_holding_count"]}</strong>
+      </article>
+    </section>
+
+    <section class="section" id="digest-region">
       <div class="section-header">
         <div>
-          <h2>Recent Report Shortcuts</h2>
-          <p>Keep the archive off the homepage and jump straight into the latest digest, signal review, or daily review.</p>
+          <h2>Digest preview</h2>
+          <p>A short excerpt from your latest collector digest.</p>
         </div>
         <div class="subtle-links">
-          {f'<a href="{html.escape(str(latest_daily_review.get("links", {}).get("rendered")))}">Latest daily review</a>' if isinstance(latest_daily_review, dict) and isinstance(latest_daily_review.get("links"), dict) and latest_daily_review.get("links", {}).get("rendered") else ""}
+          <a href="{html.escape(digest_primary)}">Open full digest</a>
+          {daily_review_link_html}
+        </div>
+      </div>
+      <div class="digest-card">
+        <div class="digest-meta">
+          <span class="pill">{html.escape(str(latest_digest.get("label") or "Digest"))}</span>
+          <span class="pill">{html.escape(str(latest_digest.get("timestamp_label") or "-"))}</span>
+        </div>
+        <div>{digest_preview}</div>
+        {digest_advanced_block}
+      </div>
+    </section>
+
+    <section class="section" id="reports-region">
+      <div class="section-header">
+        <div>
+          <h2>Recent reports</h2>
+          <p>Jump into rendered digests and reviews generated for this workspace.</p>
         </div>
       </div>
       <div class="grid">{latest_cards_html}</div>
     </section>
+    """
 
-    <section class="section">
-      <details class="dev-tools">
-        <summary>Developer and operator links</summary>
-        <div class="developer-links">
-          <div><a href="/healthz">Health check</a> · <a href="/api/users/{quote(user_id)}/profile">Profile API</a> · <a href="/api/users/{quote(user_id)}/signals">Signals API</a></div>
-          <div><a href="/api/users/{quote(user_id)}/matches">Matches API</a> · <a href="/api/users/{quote(user_id)}/interests">Interests API</a> · <a href="/api/users/{quote(user_id)}/digest/latest">Digest API</a></div>
-        </div>
-      </details>
-    </section>
-  </main>
-</body>
-</html>"""
+    return render_document(
+        title="Collector home",
+        html_lang=lang,
+        user_id=user_id,
+        nav_active="dashboard",
+        main_inner_html=main_inner.strip(),
+    )
 
 
 def render_latest_dashboard_cards(reports_payload: dict[str, object]) -> str:
@@ -3662,7 +2941,13 @@ def render_signals_inbox(
         render_signal_card(signal, user_id=user_id, signal_review_metadata=signal_review_metadata)
         for signal in ((top_signals[:3]) if isinstance(top_signals, list) else [])
         if isinstance(signal, dict)
-    ) or '<p class="empty-state">No active signals available yet.</p>'
+    )
+    if not signal_cards.strip():
+        signal_cards = (
+            '<p class="empty-state">No active alerts yet.</p>'
+            f'<p class="empty-cta"><a href="/actions?user_id={quote(user_id)}">Regenerate alerts</a> · '
+            f'<a href="/interests?user_id={quote(user_id)}">Check saved interests</a></p>'
+        )
     return f'<div class="signal-grid">{signal_cards}</div>'
 
 
@@ -3685,223 +2970,53 @@ def render_interests_html(
         </article>
         """
         for kind, count in sorted(interest_kind_counts.items())
-    ) or '<p class="empty-state">No active interest kinds found yet.</p>'
+    )
+    if not kind_cards_html.strip():
+        kind_cards_html = (
+            '<p class="empty-state">No saved interests yet, so there is nothing to chart.</p>'
+            f'<p class="empty-cta"><a class="action-button" href="/interests/new?user_id={quote(user_id)}">Add your first interest</a></p>'
+        )
     interest_cards_html = "\n".join(
         render_interest_detail_card(interest, user_id=user_id)
         for interest in interests
         if isinstance(interest, dict)
-    ) or '<p class="empty-state">No active interests found yet.</p>'
-
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Interest Management</title>
-  <style>
-    :root {{
-      --bg: #f4ede1;
-      --panel: rgba(255, 250, 244, 0.88);
-      --panel-strong: #fff9f0;
-      --border: #decaae;
-      --ink: #1d2128;
-      --muted: #706658;
-      --accent: #8f3911;
-      --accent-soft: #f1e0cb;
-      --accent-deep: #4e2513;
-      --shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
-      margin: 0;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at top left, rgba(188, 121, 48, 0.18), transparent 22%),
-        radial-gradient(circle at 80% 10%, rgba(124, 86, 43, 0.1), transparent 20%),
-        linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
-    }}
-    main {{ max-width: 1120px; margin: 0 auto; padding: 36px 20px 60px; }}
-    nav {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-bottom: 18px;
-    }}
-    nav a {{
-      padding: 8px 12px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: rgba(255, 250, 244, 0.78);
-      color: var(--muted);
-      font-size: 0.92rem;
-      text-decoration: none;
-    }}
-    .hero, .section {{
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 28px;
-      padding: 24px;
-      margin-bottom: 22px;
-      box-shadow: var(--shadow);
-    }}
-    .hero {{
-      background: linear-gradient(135deg, rgba(255, 247, 236, 0.98), rgba(241, 223, 195, 0.9));
-    }}
-    .hero h1 {{
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2.1rem, 4vw, 3.3rem);
-      letter-spacing: -0.04em;
-      margin: 0 0 10px;
-    }}
-    .hero p, .section p {{
-      color: var(--muted);
-      line-height: 1.6;
-    }}
-    .eyebrow {{
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-      font-size: 0.78rem;
-      color: var(--muted);
-    }}
-    .chip-row, .detail-row, .meta-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 16px;
-    }}
-    .chip, .pill {{
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      border-radius: 999px;
-      padding: 7px 11px;
-      background: var(--accent-soft);
-      color: var(--accent);
-      font-size: 0.84rem;
-      font-weight: 600;
-      border: 1px solid var(--border);
-    }}
-    .summary-grid, .interest-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 14px;
-    }}
-    .interest-grid {{
-      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    }}
-    .summary-card, .interest-detail-card {{
-      background: var(--panel-strong);
-      border: 1px solid var(--border);
-      border-radius: 22px;
-      padding: 18px;
-      box-shadow: var(--shadow);
-    }}
-    .summary-card strong {{
-      display: block;
-      font-size: 1.9rem;
-      font-family: Georgia, "Times New Roman", serif;
-      color: var(--accent-deep);
-      margin-top: 8px;
-    }}
-    .section-header {{
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      gap: 12px;
-      margin-bottom: 18px;
-    }}
-    .interest-detail-card h3 {{
-      margin: 0;
-      font-size: 1.18rem;
-      line-height: 1.3;
-    }}
-    .interest-detail-card p {{
-      margin: 8px 0 0;
-      color: var(--muted);
-      line-height: 1.55;
-    }}
-    .stack {{
-      display: grid;
-      gap: 10px;
-      margin-top: 14px;
-    }}
-    .hero-actions, .detail-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-top: 16px;
-      align-items: center;
-    }}
-    .subpanel {{
-      background: rgba(255, 250, 244, 0.76);
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 14px;
-    }}
-    .subpanel h4 {{
-      margin: 0 0 8px;
-      font-size: 0.98rem;
-      color: var(--accent-deep);
-    }}
-    ul {{
-      margin: 0;
-      padding-left: 18px;
-      color: var(--muted);
-      display: grid;
-      gap: 6px;
-    }}
-    code {{
-      font-family: "JetBrains Mono", "Cascadia Code", monospace;
-      background: #efe4d4;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }}
-    a {{ color: var(--accent); text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    .empty-state {{ color: var(--muted); margin: 0; }}
-    .inline-form {{
-      margin: 0;
-    }}
-  </style>
-</head>
-<body>
-  <main>
-    <nav>
-      <a href="/?user_id={quote(user_id)}">Dashboard</a>
-      <a href="/actions?user_id={quote(user_id)}">Actions</a>
-      <a href="/interests?user_id={quote(user_id)}">Interests</a>
-      <a href="/matches?user_id={quote(user_id)}">Opportunities</a>
-      <a href="/api/users/{quote(user_id)}/interests">Interests JSON</a>
-      <a href="/api/users/{quote(user_id)}/profile">Profile JSON</a>
-    </nav>
-    <section class="hero">
-      <span class="eyebrow">Interest Management</span>
+    )
+    if not interest_cards_html.strip():
+        interest_cards_html = (
+            '<p class="empty-state">No saved interests yet.</p>'
+            f'<p class="empty-cta"><a class="action-button" href="/interests/new?user_id={quote(user_id)}">Add an interest</a>'
+            f' · <a href="/actions?user_id={quote(user_id)}">Open settings</a></p>'
+        )
+    lang = html_lang_attr(str(user.get("language") or ""))
+    inner = f"""
+    <div class="detail-body">
+    <section class="hero page-hero">
+      <span class="eyebrow">Saved interests</span>
       <h1>{html.escape(str(user["display_name"]))}</h1>
-      <p>Inspect the collector's active interests, targets, holdings, signal policies, and the current operational pressure around each idea.</p>
-      <div class="chip-row">
-        <span class="chip">User <code>{html.escape(str(user["id"]))}</code></span>
-        <span class="chip">Language <code>{html.escape(str(user["language"]))}</code></span>
-        <span class="chip">Timezone <code>{html.escape(str(user["timezone"]))}</code></span>
-      </div>
+      <p>Everything we watch on your behalf lives here—targets you care about, optional holdings you track, and how often we should ping you.</p>
+      <details class="identity-advanced">
+        <summary>Language & account id</summary>
+        <p>{html.escape(str(user["language"]))} · {html.escape(str(user["timezone"]))}</p>
+        <p>Account id <code>{html.escape(str(user["id"]))}</code></p>
+      </details>
       <div class="hero-actions">
         <a class="action-button" href="/interests/new?user_id={quote(user_id)}">Add interest</a>
-        <a href="/actions?user_id={quote(user_id)}">Open actions</a>
+        <a href="/actions?user_id={quote(user_id)}">Settings &amp; refresh</a>
       </div>
     </section>
-    <section class="summary-grid">
-      <article class="summary-card"><span class="eyebrow">Active Interests</span><strong>{summary.get("active_interest_count", 0)}</strong></article>
-      <article class="summary-card"><span class="eyebrow">Active Targets</span><strong>{summary.get("active_target_count", 0)}</strong></article>
-      <article class="summary-card"><span class="eyebrow">Tracked Holdings</span><strong>{summary.get("active_holding_count", 0)}</strong></article>
-      <article class="summary-card"><span class="eyebrow">High Priority</span><strong>{summary.get("high_priority_count", 0)}</strong></article>
-      <article class="summary-card"><span class="eyebrow">Immediate Delivery</span><strong>{summary.get("immediate_policy_count", 0)}</strong></article>
-      <article class="summary-card"><span class="eyebrow">Interests With Holdings</span><strong>{summary.get("interests_with_holdings", 0)}</strong></article>
+    <section class="summary-grid" aria-label="Overview counts">
+      <article class="summary-card"><span class="eyebrow">Saved interests</span><strong>{summary.get("active_interest_count", 0)}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Targets</span><strong>{summary.get("active_target_count", 0)}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Tracked holdings</span><strong>{summary.get("active_holding_count", 0)}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Marked high priority</span><strong>{summary.get("high_priority_count", 0)}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Immediate alerts on</span><strong>{summary.get("immediate_policy_count", 0)}</strong></article>
+      <article class="summary-card"><span class="eyebrow">With holdings linked</span><strong>{summary.get("interests_with_holdings", 0)}</strong></article>
     </section>
     <section class="section">
       <div class="section-header">
         <div>
-          <h2>Interest Mix</h2>
-          <p>How this collector's active interests are distributed by kind.</p>
+          <h2>Mix by intent</h2>
+          <p>How many saved interests fall into each type (buy watch, collecting, discovery, and so on).</p>
         </div>
       </div>
       <div class="summary-grid">{kind_cards_html}</div>
@@ -3909,16 +3024,23 @@ def render_interests_html(
     <section class="section">
       <div class="section-header">
         <div>
-          <h2>All Active Interests</h2>
-          <p>Each card includes the current target, policy, holdings, and live match/signal counts.</p>
+          <h2>All saved interests</h2>
+          <p>Expand sections on each card for technical detail. Alerts and matches summarize what is active today.</p>
         </div>
         <a class="action-button" href="/interests/new?user_id={quote(user_id)}">Add interest</a>
       </div>
       <div class="interest-grid">{interest_cards_html}</div>
     </section>
-  </main>
-</body>
-</html>"""
+    </div>
+    """
+    return render_document(
+        title="Saved interests",
+        html_lang=lang,
+        user_id=user_id,
+        nav_active="interests",
+        main_inner_html=inner.strip(),
+        main_classes="page-wide detail-body-wrap detail-matches-wide",
+    )
 
 
 def render_matches_html(
@@ -3935,175 +3057,54 @@ def render_matches_html(
         render_match_card(match, user_id=user_id)
         for match in top_matches
         if isinstance(match, dict)
-    ) or '<p class="empty-state">No active matches found yet.</p>'
+    )
+    if not match_cards_html.strip():
+        match_cards_html = (
+            '<p class="empty-state">No live matches yet—they appear after syncing and refreshing.</p>'
+            f'<p class="empty-cta"><a class="action-button" href="/actions?user_id={quote(user_id)}">Open settings &amp; refresh</a>'
+            f' · <a href="/interests?user_id={quote(user_id)}">Review saved interests</a></p>'
+        )
     group_cards_html = "\n".join(
         render_opportunity_group_card(group, user_id=user_id)
         for group in groups
         if isinstance(group, dict)
-    ) or '<p class="empty-state">No grouped opportunities found yet.</p>'
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Matches & Opportunities</title>
-  <style>
-    :root {{
-      --bg: #f4ede1;
-      --panel: rgba(255, 250, 244, 0.88);
-      --panel-strong: #fff9f0;
-      --border: #decaae;
-      --ink: #1d2128;
-      --muted: #706658;
-      --accent: #8f3911;
-      --accent-soft: #f1e0cb;
-      --accent-deep: #4e2513;
-      --shadow: 0 24px 60px rgba(91, 58, 20, 0.09);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
-      margin: 0;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at top left, rgba(188, 121, 48, 0.18), transparent 22%),
-        radial-gradient(circle at 80% 10%, rgba(124, 86, 43, 0.1), transparent 20%),
-        linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
-    }}
-    main {{ max-width: 1120px; margin: 0 auto; padding: 36px 20px 60px; }}
-    nav {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-bottom: 18px;
-    }}
-    nav a {{
-      padding: 8px 12px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: rgba(255, 250, 244, 0.78);
-      color: var(--muted);
-      font-size: 0.92rem;
-      text-decoration: none;
-    }}
-    .hero, .section {{
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 28px;
-      padding: 24px;
-      margin-bottom: 22px;
-      box-shadow: var(--shadow);
-    }}
-    .hero {{
-      background: linear-gradient(135deg, rgba(255, 247, 236, 0.98), rgba(241, 223, 195, 0.9));
-    }}
-    .hero h1 {{
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2.1rem, 4vw, 3.3rem);
-      letter-spacing: -0.04em;
-      margin: 0 0 10px;
-    }}
-    .hero p, .section p {{
-      color: var(--muted);
-      line-height: 1.6;
-    }}
-    .eyebrow {{
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-      font-size: 0.78rem;
-      color: var(--muted);
-    }}
-    .chip-row, .meta-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 16px;
-    }}
-    .chip, .pill {{
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      border-radius: 999px;
-      padding: 7px 11px;
-      background: var(--accent-soft);
-      color: var(--accent);
-      font-size: 0.84rem;
-      font-weight: 600;
-      border: 1px solid var(--border);
-    }}
-    .summary-grid, .card-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 14px;
-    }}
-    .summary-card, .match-card, .opportunity-card {{
-      background: var(--panel-strong);
-      border: 1px solid var(--border);
-      border-radius: 22px;
-      padding: 18px;
-      box-shadow: var(--shadow);
-    }}
-    .summary-card strong {{
-      display: block;
-      font-size: 1.9rem;
-      font-family: Georgia, "Times New Roman", serif;
-      color: var(--accent-deep);
-      margin-top: 8px;
-    }}
-    .section-header {{
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      gap: 12px;
-      margin-bottom: 18px;
-    }}
-    .match-card h3, .opportunity-card h3 {{
-      margin: 0;
-      font-size: 1.08rem;
-      line-height: 1.35;
-    }}
-    .match-card p, .opportunity-card p {{
-      margin: 8px 0 0;
-      color: var(--muted);
-      line-height: 1.55;
-    }}
-    a {{ color: var(--accent); text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    .empty-state {{ color: var(--muted); margin: 0; }}
-  </style>
-</head>
-<body>
-  <main>
-    <nav>
-      <a href="/?user_id={quote(user_id)}">Dashboard</a>
-      <a href="/actions?user_id={quote(user_id)}">Actions</a>
-      <a href="/matches?user_id={quote(user_id)}">Opportunities</a>
-      <a href="/api/users/{quote(user_id)}/matches">Matches JSON</a>
-      <a href="/api/users/{quote(user_id)}/matching/run">Matching action</a>
-    </nav>
-    <section class="hero">
-      <span class="eyebrow">Matches & Opportunities</span>
+    )
+    if not group_cards_html.strip():
+        group_cards_html = (
+            '<p class="empty-state">No clustered opportunities yet.</p>'
+            f'<p class="empty-cta"><a href="/actions?user_id={quote(user_id)}">Run matching</a>'
+            f' · <a href="/interests/new?user_id={quote(user_id)}">Add an interest</a></p>'
+        )
+    lang = html_lang_attr(str(user.get("language") or ""))
+    inner = f"""
+    <div class="detail-body">
+    <section class="hero page-hero">
+      <span class="eyebrow">Matches &amp; opportunities</span>
       <h1>{html.escape(str(user["display_name"]))}</h1>
-      <p>Review the active matched inventory for this collector, grouped into opportunity clusters by relationship strength and listing status.</p>
-      <div class="chip-row">
-        <span class="chip">User <strong>{html.escape(str(user["id"]))}</strong></span>
-        <span class="chip">Language <strong>{html.escape(str(user["language"]))}</strong></span>
-        <span class="chip">Timezone <strong>{html.escape(str(user["timezone"]))}</strong></span>
+      <p>Listings that line up with your saved interests—grouped where several auctions look like one opportunity.</p>
+      <details class="identity-advanced">
+        <summary>Language &amp; account id</summary>
+        <p>{html.escape(str(user["language"]))} · {html.escape(str(user["timezone"]))}</p>
+        <p>Account id <code>{html.escape(str(user["id"]))}</code></p>
+      </details>
+      <div class="hero-actions">
+        <a class="action-button" href="/actions?user_id={quote(user_id)}">Refresh matches</a>
+        <a href="/?user_id={quote(user_id)}#signals">View alerts</a>
       </div>
     </section>
-    <section class="summary-grid">
-      <article class="summary-card"><span class="eyebrow">Active Matches</span><strong>{summary["active_match_count"]}</strong></article>
-      <article class="summary-card"><span class="eyebrow">High Score</span><strong>{summary["high_score_count"]}</strong></article>
-      <article class="summary-card"><span class="eyebrow">Live</span><strong>{summary["live_count"]}</strong></article>
-      <article class="summary-card"><span class="eyebrow">Preview</span><strong>{summary["preview_count"]}</strong></article>
-      <article class="summary-card"><span class="eyebrow">Exact</span><strong>{summary["exact_count"]}</strong></article>
-      <article class="summary-card"><span class="eyebrow">Groups</span><strong>{summary["opportunity_group_count"]}</strong></article>
+    <section class="summary-grid" aria-label="Match overview">
+      <article class="summary-card"><span class="eyebrow">Live matches</span><strong>{summary["active_match_count"]}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Strong fits (high score)</span><strong>{summary["high_score_count"]}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Auctions live now</span><strong>{summary["live_count"]}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Upcoming / preview</span><strong>{summary["preview_count"]}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Exact title fits</span><strong>{summary["exact_count"]}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Opportunity groups</span><strong>{summary["opportunity_group_count"]}</strong></article>
     </section>
     <section class="section">
       <div class="section-header">
         <div>
-          <h2>Opportunity Groups</h2>
-          <p>Grouped by interest, relationship type, listing status, and listing title so repeated inventory reads like one opportunity cluster.</p>
+          <h2>Opportunity groups</h2>
+          <p>Repeated listings clustered by interest, how close the fit is, and auction state.</p>
         </div>
       </div>
       <div class="card-grid">{group_cards_html}</div>
@@ -4111,15 +3112,22 @@ def render_matches_html(
     <section class="section">
       <div class="section-header">
         <div>
-          <h2>Top Matches</h2>
-          <p>Highest-scoring current candidates across all active interests.</p>
+          <h2>Top individual matches</h2>
+          <p>Highest-scoring listings across your active interests.</p>
         </div>
       </div>
       <div class="card-grid">{match_cards_html}</div>
     </section>
-  </main>
-</body>
-</html>"""
+    </div>
+    """
+    return render_document(
+        title="Matches & opportunities",
+        html_lang=lang,
+        user_id=user_id,
+        nav_active="matches",
+        main_inner_html=inner.strip(),
+        main_classes="page-wide detail-body-wrap detail-matches-wide",
+    )
 
 
 def render_signal_card(
@@ -4147,9 +3155,13 @@ def render_signal_card(
         note_bits.append(f'<p class="signal-note">{html.escape(str(context_note))}</p>')
     if pricing_note:
         note_bits.append(f'<p class="signal-note">{html.escape(str(pricing_note))}</p>')
-    links = [f'<a href="/api/users/{quote(user_id)}/signals">Signals JSON</a>']
+    links: list[str] = []
     if latest_review_link:
-        links.append(f'<a href="{html.escape(str(latest_review_link))}">Latest signal review</a>')
+        links.append(f'<a href="{html.escape(str(latest_review_link))}">Latest alert roundup</a>')
+    if show_app_dev_ui():
+        links.append(f'<a href="/api/users/{quote(user_id)}/signals">Alerts (JSON)</a>')
+    links_html = " · ".join(links) if links else ""
+    links_block = f'<div class="signal-links">{links_html}</div>' if links_html else ""
     return f"""
     <article class="signal-card">
       <div class="signal-meta">
@@ -4162,7 +3174,7 @@ def render_signal_card(
       <p>{html.escape(str(signal.get("signal_summary") or ""))}</p>
       {''.join(note_bits)}
       <p class="signal-note">Interest: <strong>{html.escape(interest_name)}</strong> | last seen {html.escape(str(signal.get("last_seen_at") or "-"))}</p>
-      <div class="signal-links">{''.join(links)}</div>
+      {links_block}
     </article>
     """
 
@@ -4179,7 +3191,7 @@ def render_signal_interest_group_card(group: dict[str, object]) -> str:
                 f"<span class=\"signal-note\">{html.escape(str(signal.get('urgency') or '-'))} | "
                 f"{html.escape(format_signal_type_label(str(signal.get('signal_type') or '')))}</span></li>"
             )
-    items_html = "".join(items) or "<li>No active signals.</li>"
+    items_html = "".join(items) or "<li>No active alerts.</li>"
     return f"""
     <article class="signal-interest-card">
       <div class="signal-meta">
@@ -4209,7 +3221,7 @@ def render_match_card(match: dict[str, object], *, user_id: str) -> str:
       <p>Target: <strong>{html.escape(str(match.get("target_label") or "-"))}</strong></p>
       <p>Listing id <strong>{html.escape(str(match.get("source_listing_id") or "-"))}</strong> | last updated {html.escape(str(match.get("listing_updated_at") or "-"))}</p>
       <p>{html.escape(str(note or reasons_text))}</p>
-      <p><a href="/api/users/{quote(user_id)}/matches">Open matches JSON</a></p>
+      {f'<p class="signal-note"><a href="/api/users/{quote(user_id)}/matches">Matches (JSON)</a></p>' if show_app_dev_ui() else ""}
     </article>
     """
 
@@ -4236,7 +3248,7 @@ def render_opportunity_group_card(group: dict[str, object], *, user_id: str) -> 
       <p>Target: {html.escape(str(group.get("target_label") or "-"))}</p>
       <p>Top score {html.escape(str(group.get("top_match_score") or 0))} | price range {html.escape(price_label)}</p>
       <p>Examples: {html.escape(sample_label)}</p>
-      <p><a href="/api/users/{quote(user_id)}/matches">Open matches JSON</a></p>
+      {f'<p class="signal-note"><a href="/api/users/{quote(user_id)}/matches">Matches (JSON)</a></p>' if show_app_dev_ui() else ""}
     </article>
     """
 
@@ -4299,92 +3311,156 @@ def render_interest_detail_card(interest: dict[str, object], *, user_id: str) ->
             f"qty {html.escape(str(holding.get('holding_quantity') or '-'))} | "
             f"cost {html.escape(str(holding.get('cost_basis_unit') or '-'))}</li>"
         )
-    holding_html = "".join(holding_items) or "<li>No linked holdings.</li>"
+    holding_html = "".join(holding_items) or "<li>No holdings linked.</li>"
 
     policy_bits = [
         f"delivery <strong>{html.escape(str(policy.get('delivery_mode') or '-'))}</strong>",
-        f"cooldown <strong>{html.escape(str(policy.get('cooldown_hours') or '-'))}h</strong>",
-        f"min score <strong>{html.escape(str(policy.get('min_match_score') or '-'))}</strong>",
-        f"signals/day <strong>{html.escape(str(policy.get('max_signals_per_day') or '-'))}</strong>",
+        f"quiet period <strong>{html.escape(str(policy.get('cooldown_hours') or '-'))}h</strong>",
+        f"min fit score <strong>{html.escape(str(policy.get('min_match_score') or '-'))}</strong>",
+        f"max alerts/day <strong>{html.escape(str(policy.get('max_signals_per_day') or '-'))}</strong>",
     ]
-    note_html = f"<p>{html.escape(notes)}</p>" if notes else "<p class=\"empty-state\">No operator notes attached.</p>"
+    note_html = f"<p>{html.escape(notes)}</p>" if notes else '<p class="empty-state">No notes yet.</p>'
+    prio = html.escape(str(interest.get("interest_priority") or "-"))
+    kind = html.escape(str(interest.get("interest_kind") or "-"))
+    dev_row = ""
+    if show_app_dev_ui():
+        dev_row = (
+            f'<p class="signal-note">API: '
+            f'<a href="/api/users/{quote(user_id)}/interests">interests</a> · '
+            f'<a href="/api/users/{quote(user_id)}/signals">alerts</a> · '
+            f'<a href="/api/users/{quote(user_id)}/matches">matches</a>'
+            f"</p>"
+        )
 
     return f"""
     <article class="interest-detail-card">
       <div class="meta-row">
-        <span class="pill">{html.escape(str(interest.get("interest_kind") or "-"))}</span>
-        <span class="pill">{html.escape(str(interest.get("scope_kind") or "-"))}</span>
-        <span class="pill">{html.escape(str(interest.get("precision_mode") or "-"))}</span>
-        <span class="pill">{html.escape(str(interest.get("interest_priority") or "-"))}</span>
+        <span class="pill">{kind}</span>
+        <span class="pill">Priority {prio}</span>
       </div>
       <h3>{html.escape(str(interest.get("interest_name") or "-"))}</h3>
-      <p>Signals <strong>{html.escape(str(summary.get("active_signal_count") or 0))}</strong> | matches <strong>{html.escape(str(summary.get("active_match_count") or 0))}</strong> | targets <strong>{html.escape(str(summary.get("active_target_count") or 0))}</strong> | holdings <strong>{html.escape(str(summary.get("active_holding_count") or 0))}</strong></p>
+      <p>Active alerts <strong>{html.escape(str(summary.get("active_signal_count") or 0))}</strong> ·
+      live matches <strong>{html.escape(str(summary.get("active_match_count") or 0))}</strong> ·
+      targets <strong>{html.escape(str(summary.get("active_target_count") or 0))}</strong> ·
+      holdings <strong>{html.escape(str(summary.get("active_holding_count") or 0))}</strong></p>
       <div class="stack">
-        <section class="subpanel">
-          <h4>Target Setup</h4>
+        <details class="subpanel subpanel-collapsible" open>
+          <summary><h4>Targeting &amp; budget</h4></summary>
           <ul>{target_html}</ul>
-        </section>
-        <section class="subpanel">
-          <h4>Holdings</h4>
+        </details>
+        <details class="subpanel subpanel-collapsible">
+          <summary><h4>Holdings</h4></summary>
           <ul>{holding_html}</ul>
-        </section>
-        <section class="subpanel">
-          <h4>Signal Policy</h4>
+        </details>
+        <details class="subpanel subpanel-collapsible">
+          <summary><h4>Alert rules</h4></summary>
           <p>{" | ".join(policy_bits)}</p>
-          <p>notify preview <strong>{html.escape(str(policy.get("notify_on_preview") or 0))}</strong> | live <strong>{html.escape(str(policy.get("notify_on_live") or 0))}</strong> | ended <strong>{html.escape(str(policy.get("notify_on_ended") or 0))}</strong></p>
-          <p>exact <strong>{html.escape(str(policy.get("notify_on_exact_match") or 0))}</strong> | variant <strong>{html.escape(str(policy.get("notify_on_variant_match") or 0))}</strong> | series <strong>{html.escape(str(policy.get("notify_on_series_match") or 0))}</strong></p>
-        </section>
-        <section class="subpanel">
-          <h4>Operator Notes</h4>
+          <p class="signal-note">When to notify:
+          preview listings <strong>{html.escape(str(policy.get("notify_on_preview") or 0))}</strong> ·
+          live <strong>{html.escape(str(policy.get("notify_on_live") or 0))}</strong> ·
+          ended <strong>{html.escape(str(policy.get("notify_on_ended") or 0))}</strong></p>
+          <p class="signal-note">Match shape:
+          exact <strong>{html.escape(str(policy.get("notify_on_exact_match") or 0))}</strong> ·
+          variant <strong>{html.escape(str(policy.get("notify_on_variant_match") or 0))}</strong> ·
+          series <strong>{html.escape(str(policy.get("notify_on_series_match") or 0))}</strong></p>
+        </details>
+        <details class="subpanel subpanel-collapsible">
+          <summary><h4>Notes</h4></summary>
           {note_html}
-        </section>
+        </details>
+        <details class="subpanel subpanel-collapsible">
+          <summary><h4>Advanced matching scope</h4></summary>
+          <p class="signal-note">
+            Scope <strong>{html.escape(str(interest.get("scope_kind") or "-"))}</strong>
+            · precision <strong>{html.escape(str(interest.get("precision_mode") or "-"))}</strong>
+          </p>
+        </details>
       </div>
+      {dev_row}
       <div class="detail-row">
-        <a href="/interests/edit?user_id={quote(user_id)}&interest_id={quote(str(interest.get('id') or ''))}">Edit settings</a>
-        <a href="/api/users/{quote(user_id)}/interests">Interests JSON</a>
-        <a href="/api/users/{quote(user_id)}/signals">Signals JSON</a>
-        <a href="/api/users/{quote(user_id)}/matches">Matches JSON</a>
-        <a href="/matches?user_id={quote(user_id)}">Open opportunities</a>
-        <form class="inline-form" method="post" action="/interests/delete" onsubmit="return confirm('Deactivate this interest and hide its active matches/signals?');">
+        <a class="action-button" href="/interests/edit?user_id={quote(user_id)}&interest_id={quote(str(interest.get('id') or ''))}">Edit</a>
+        <a href="/matches?user_id={quote(user_id)}">See matches</a>
+        <form class="inline-form" method="post" action="/interests/delete" onsubmit="return confirm('Stop tracking this interest? Active matches and alerts tied to it will be hidden.');">
           <input type="hidden" name="user_id" value="{html.escape(user_id)}">
           <input type="hidden" name="interest_id" value="{html.escape(str(interest.get('id') or ''))}">
-          <button class="danger-button" type="submit">Delete interest</button>
+          <button class="danger-button" type="submit">Remove interest</button>
         </form>
       </div>
     </article>
     """
 
 
+DIGEST_PREVIEW_MAX_HIGHLIGHTS = 5
+
+
 def render_digest_preview(markdown: str) -> str:
+    """Short excerpt shown on dashboard – structured for quick scanning."""
     lines = markdown.splitlines()
     highlight_lines: list[str] = []
     inside_highlights = False
     for line in lines:
         stripped = line.strip()
-        if stripped == "## Highlights":
+        if stripped in {"## Highlights", "## At a glance"}:
             inside_highlights = True
             continue
         if inside_highlights and stripped.startswith("## "):
             break
         if inside_highlights and stripped.startswith("- "):
-            highlight_lines.append(stripped)
-            if len(highlight_lines) >= 4:
+            highlight_lines.append(stripped[2:])
+        elif inside_highlights and stripped.startswith("* "):
+            highlight_lines.append(stripped[2:])
+            if len(highlight_lines) >= DIGEST_PREVIEW_MAX_HIGHLIGHTS:
                 break
-    if highlight_lines:
-        return "".join(f"<p>{render_inline_markdown(line)}</p>" for line in highlight_lines)
 
-    preview_lines: list[str] = []
+    def item_html(text: str) -> str:
+        return f"<li>{render_inline_markdown(text)}</li>"
+
+    if highlight_lines:
+        items = "".join(item_html(bit) for bit in highlight_lines)
+        return (
+            '<article class="digest-preview-read">'
+            '<h4 class="digest-preview-heading">At a glance</h4>'
+            f'<ul class="digest-preview-list">{items}</ul>'
+            "</article>"
+        )
+
+    preview_items: list[str] = []
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped == "# V2 Interest Daily Digest":
             continue
-        preview_lines.append(stripped)
-        if len(preview_lines) >= 6:
+        if stripped.startswith("## ") or stripped == "---":
             break
-    if not preview_lines:
+        if stripped.startswith("- "):
+            preview_items.append(stripped[2:])
+        elif stripped.startswith("* "):
+            preview_items.append(stripped[2:])
+            if len(preview_items) >= 6:
+                break
+        else:
+            break
+
+    if preview_items:
+        items = "".join(item_html(bit) for bit in preview_items)
+        return (
+            '<article class="digest-preview-read">'
+            '<h4 class="digest-preview-heading">Snapshot</h4>'
+            f'<ul class="digest-preview-list">{items}</ul>'
+            "</article>"
+        )
+
+    preview_lines_fallback: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped == "# V2 Interest Daily Digest":
+            continue
+        preview_lines_fallback.append(stripped)
+        if len(preview_lines_fallback) >= 5:
+            break
+    if not preview_lines_fallback:
         return '<p class="empty-state">No digest summary available yet.</p>'
-    preview_html = "".join(f"<p>{render_inline_markdown(line)}</p>" for line in preview_lines)
-    return preview_html
+    paras = "".join(f"<p class=\"digest-preview-para\">{render_inline_markdown(line)}</p>" for line in preview_lines_fallback)
+    return f'<article class="digest-preview-read">{paras}</article>'
 
 
 def format_signal_type_label(signal_type: str) -> str:
@@ -4422,9 +3498,9 @@ def render_action_report_row(item: object, *, empty_label: str) -> str:
     raw = links.get("raw") if isinstance(links, dict) else None
     link_html = ""
     if rendered:
-        link_html += f'<div><a href="{html.escape(str(rendered))}">Open rendered</a></div>'
-    if raw:
-        link_html += f'<div><a href="{html.escape(str(raw))}">Open raw</a></div>'
+        link_html += f'<div><a href="{html.escape(str(rendered))}">Readable view</a></div>'
+    if raw and show_app_dev_ui():
+        link_html += f'<div><a href="{html.escape(str(raw))}">Markdown source</a></div>'
     return f"""
     <article class="report-row">
       <div>
@@ -4480,10 +3556,206 @@ def render_bundle_row(item: dict[str, object]) -> str:
     """
 
 
+_DIGEST_HEADING_SWAP = {
+    "## Highlights": "## At a glance",
+    "## Interest Breakdown": "## By saved interest",
+    "## highlights": "## At a glance",
+    "## interest breakdown": "## By saved interest",
+}
+
+
+def humanize_digest_markdown(markdown: str, *, omit_leading_digest_title: bool = False) -> str:
+    """Friendlier headings; optionally drop duplicated title when rendered in page hero."""
+    lines = markdown.splitlines()
+    if omit_leading_digest_title and lines:
+        strip0 = lines[0].strip()
+        if strip0 == "# V2 Interest Daily Digest" or strip0 == "# Your daily digest":
+            lines = lines[1:]
+            while lines and not lines[0].strip():
+                lines = lines[1:]
+    out: list[str] = []
+    for raw in lines:
+        s = raw
+        stripped = s.strip()
+        if stripped == "# V2 Interest Daily Digest":
+            s = "# Your daily digest"
+        elif stripped in _DIGEST_HEADING_SWAP:
+            s = _DIGEST_HEADING_SWAP[stripped]
+        out.append(s)
+    return "\n".join(out)
+
+
+def extract_digest_leading_bullets(markdown: str) -> tuple[list[str], str]:
+    """Pull the opening metadata bullet list away from prose so it can render as a summary strip."""
+    lines = markdown.splitlines()
+    idx = 0
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    bullets: list[str] = []
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            bullets.append(stripped[2:])
+            idx += 1
+            continue
+        break
+    remainder = "\n".join(lines[idx:])
+    return bullets, remainder
+
+
+def render_digest_markdown_html(text: str) -> str:
+    """Full digest markdown → readable HTML with a skim-friendly overview strip."""
+    prepared = humanize_digest_markdown(text, omit_leading_digest_title=True).lstrip("\n")
+    bullets, remainder = extract_digest_leading_bullets(prepared)
+    sections: list[str] = []
+    if bullets:
+        lis = "".join(f"<li>{render_inline_markdown(item)}</li>" for item in bullets)
+        sections.append(
+            '<aside class="digest-doc-meta" aria-label="Digest overview">'
+            "<p>This edition covers</p>"
+            f"<ul>{lis}</ul></aside>"
+        )
+    trimmed = remainder.strip()
+    if trimmed:
+        sections.append(render_markdown_html(trimmed))
+    return "\n".join(sections) if sections else "<p>No digest body.</p>"
+
+
+def render_digest_structured_html(text: str) -> str:
+    """Digest-specific rendering with cards and grouped details."""
+    prepared = humanize_digest_markdown(text, omit_leading_digest_title=True)
+    bullets, remainder = extract_digest_leading_bullets(prepared.lstrip("\n"))
+    lines = remainder.splitlines()
+
+    at_a_glance: list[str] = []
+    interest_cards: list[dict[str, object]] = []
+
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped in {"## At a glance", "## Highlights"}:
+            i += 1
+            while i < len(lines):
+                item = lines[i].strip()
+                if item.startswith("## "):
+                    break
+                if item.startswith("- ") or item.startswith("* "):
+                    at_a_glance.append(item[2:])
+                i += 1
+            continue
+        if stripped in {"## By saved interest", "## Interest Breakdown"}:
+            i += 1
+            break
+        i += 1
+
+    current: dict[str, object] | None = None
+    current_group: str | None = None
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.startswith("### "):
+            if current:
+                interest_cards.append(current)
+            current = {"title": stripped[4:], "facts": [], "groups": {}, "digest_summary": ""}
+            current_group = None
+            i += 1
+            continue
+        if current is None:
+            i += 1
+            continue
+        if stripped == "---":
+            if current:
+                interest_cards.append(current)
+            current = None
+            current_group = None
+            i += 1
+            continue
+        if not stripped:
+            i += 1
+            continue
+        if stripped.endswith(":") and not stripped.startswith("- "):
+            current_group = stripped[:-1]
+            groups = current.get("groups")
+            if isinstance(groups, dict):
+                groups.setdefault(current_group, [])
+            i += 1
+            continue
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            payload = stripped[2:]
+            if payload.lower().startswith("digest summary:"):
+                current["digest_summary"] = payload.split(":", 1)[1].strip() if ":" in payload else payload
+            elif current_group:
+                groups = current.get("groups")
+                if isinstance(groups, dict):
+                    bucket = groups.get(current_group)
+                    if isinstance(bucket, list):
+                        bucket.append(payload)
+            else:
+                facts = current.get("facts")
+                if isinstance(facts, list):
+                    facts.append(payload)
+            i += 1
+            continue
+        if current_group:
+            groups = current.get("groups")
+            if isinstance(groups, dict):
+                bucket = groups.get(current_group)
+                if isinstance(bucket, list):
+                    bucket.append(stripped)
+        i += 1
+    if current:
+        interest_cards.append(current)
+
+    head_bits: list[str] = []
+    if bullets:
+        lis = "".join(f"<li>{render_inline_markdown(item)}</li>" for item in bullets)
+        head_bits.append(
+            '<aside class="digest-doc-meta" aria-label="Digest overview">'
+            "<p>This edition covers</p>"
+            f"<ul>{lis}</ul></aside>"
+        )
+    if at_a_glance:
+        lis = "".join(f"<li>{render_inline_markdown(item)}</li>" for item in at_a_glance)
+        head_bits.append(
+            '<section class="digest-at-a-glance"><h2>At a glance</h2>'
+            f"<ul>{lis}</ul></section>"
+        )
+
+    cards_html: list[str] = []
+    for card in interest_cards:
+        title = html.escape(str(card.get("title") or "-"))
+        facts = card.get("facts") if isinstance(card.get("facts"), list) else []
+        groups = card.get("groups") if isinstance(card.get("groups"), dict) else {}
+        digest_summary = str(card.get("digest_summary") or "").strip()
+        key_facts = "".join(f"<li>{render_inline_markdown(str(item))}</li>" for item in facts[:8])
+        grouped_html_parts: list[str] = []
+        for name, items in groups.items():
+            if not isinstance(items, list) or not items:
+                continue
+            lis = "".join(f"<li>{render_inline_markdown(str(it))}</li>" for it in items[:8])
+            grouped_html_parts.append(
+                f'<details class="digest-detail-group"><summary>{html.escape(str(name))}</summary><ul>{lis}</ul></details>'
+            )
+        grouped_html = "".join(grouped_html_parts) or '<p class="digest-muted">No extra detail blocks.</p>'
+        summary_html = (
+            f'<p class="digest-summary">{render_inline_markdown(digest_summary)}</p>'
+            if digest_summary
+            else ""
+        )
+        cards_html.append(
+            f'<article class="digest-interest-card"><h3>{title}</h3>{summary_html}'
+            f'<ul class="digest-key-facts">{key_facts}</ul><div class="digest-groups">{grouped_html}</div></article>'
+        )
+
+    if cards_html:
+        return "".join(head_bits) + '<section class="digest-interest-cards">' + "".join(cards_html) + "</section>"
+    return render_digest_markdown_html(text)
+
+
 def render_markdown_html(text: str) -> str:
     lines = text.splitlines()
     blocks: list[str] = []
     paragraph_lines: list[str] = []
+    list_kind: str | None = None
     list_items: list[str] = []
 
     def flush_paragraph() -> None:
@@ -4494,11 +3766,12 @@ def render_markdown_html(text: str) -> str:
             paragraph_lines = []
 
     def flush_list() -> None:
-        nonlocal list_items
-        if list_items:
+        nonlocal list_kind, list_items
+        if list_items and list_kind:
             items_html = "".join(f"<li>{render_inline_markdown(item)}</li>" for item in list_items)
-            blocks.append(f"<ul>{items_html}</ul>")
+            blocks.append(f"<{list_kind}>{items_html}</{list_kind}>")
             list_items = []
+            list_kind = None
 
     for raw_line in lines:
         line = raw_line.rstrip()
@@ -4507,6 +3780,7 @@ def render_markdown_html(text: str) -> str:
             flush_paragraph()
             flush_list()
             continue
+
         if stripped == "---":
             flush_paragraph()
             flush_list()
@@ -4527,8 +3801,19 @@ def render_markdown_html(text: str) -> str:
             flush_list()
             blocks.append(f"<h1>{render_inline_markdown(stripped[2:])}</h1>")
             continue
-        if stripped.startswith("- "):
+        numbered = re.match(r"^(\d+)\.\s+(.+)$", stripped)
+        if numbered:
             flush_paragraph()
+            if list_kind != "ol":
+                flush_list()
+            list_kind = "ol"
+            list_items.append(numbered.group(2))
+            continue
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            flush_paragraph()
+            if list_kind != "ul":
+                flush_list()
+            list_kind = "ul"
             list_items.append(stripped[2:])
             continue
         if line.startswith("    ") or line.startswith("\t"):
@@ -4552,8 +3837,136 @@ def render_inline_markdown(text: str) -> str:
 
 
 def render_report_html(path: Path) -> str:
-    rendered = render_markdown_html(path.read_text(encoding="utf-8"))
+    markdown_source = path.read_text(encoding="utf-8")
     metadata = classify_report(path.name)
+    digest_article = metadata.get("kind") == "interest_digest_user"
+    rendered = render_digest_structured_html(markdown_source) if digest_article else render_markdown_html(markdown_source)
+    eyebrow_txt = html.escape(metadata["label"])
+    hero_title_txt = html.escape(
+        f"Your daily digest · {metadata['timestamp_label']}" if digest_article else path.name,
+    )
+    meta_scope = html.escape(metadata["scope"])
+    hero_file_hint = (
+        f'<p class="digest-file-hint">{html.escape(path.name)}</p>' if digest_article else ""
+    )
+    meta_spans_html = (
+        f'<span>{meta_scope}</span>'
+        if digest_article
+        else f'<span>{meta_scope}</span><span>{html.escape(metadata["timestamp_label"])}</span>'
+    )
+    content_class = "content digest-reading" if digest_article else "content"
+    digest_extra_css = (
+        """
+    .digest-reading {
+      font-size: 1.05rem;
+      line-height: 1.74;
+      letter-spacing: 0.01em;
+      max-width: 42rem;
+      margin-inline: auto;
+    }
+    .digest-reading aside.digest-doc-meta {
+      background: rgba(253, 250, 244, 0.95);
+      border: 1px solid rgba(223, 207, 181, 0.85);
+      border-left: 4px solid var(--accent);
+      border-radius: 16px;
+      padding: 18px 20px;
+      margin: 0 0 26px;
+    }
+    .digest-reading aside.digest-doc-meta > p:first-child {
+      margin: 0 0 12px;
+      font-size: 0.94rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .digest-reading aside.digest-doc-meta ul {
+      margin: 0;
+      padding-left: 1.2rem;
+    }
+    .digest-reading aside.digest-doc-meta li {
+      margin: 0.5em 0;
+      padding-left: 0.35em;
+    }
+    .digest-at-a-glance {
+      background: rgba(255, 252, 246, 0.94);
+      border: 1px solid rgba(223, 207, 181, 0.8);
+      border-radius: 16px;
+      padding: 16px 18px;
+      margin: 0 0 22px;
+    }
+    .digest-at-a-glance h2 {
+      margin: 0 0 10px;
+      border: 0;
+      padding: 0;
+      font-size: 1.15rem;
+    }
+    .digest-at-a-glance ul { margin: 0; padding-left: 1.2rem; }
+    .digest-interest-cards { display: grid; gap: 16px; }
+    .digest-interest-card {
+      background: rgba(255, 252, 246, 0.96);
+      border: 1px solid rgba(223, 207, 181, 0.9);
+      border-radius: 16px;
+      padding: 16px 18px;
+    }
+    .digest-interest-card h3 { margin: 0 0 10px; font-size: 1.18rem; }
+    .digest-summary {
+      margin: 0 0 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(244, 230, 213, 0.55);
+      border: 1px solid rgba(223, 207, 181, 0.85);
+      font-size: 0.98rem;
+    }
+    .digest-key-facts { margin: 0; padding-left: 1.2rem; }
+    .digest-groups { margin-top: 12px; display: grid; gap: 10px; }
+    .digest-detail-group {
+      border: 1px solid rgba(223, 207, 181, 0.75);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.6);
+      padding: 8px 10px;
+    }
+    .digest-detail-group summary { cursor: pointer; font-weight: 600; }
+    .digest-detail-group ul { margin-top: 8px; }
+    .digest-muted { color: var(--muted); margin: 0; }
+    .digest-reading h2 {
+      margin: 2.1rem 0 0.9rem;
+      padding-bottom: 0.35em;
+      border-bottom: 1px solid var(--border);
+      font-weight: 700;
+    }
+    .digest-reading h3 {
+      margin: 1.65rem 0 0.6rem;
+      font-size: 1.18rem;
+      color: rgba(53, 45, 35, 0.95);
+    }
+    .digest-reading p { margin: 0.95em 0; }
+    .digest-reading ul, .digest-reading ol { padding-left: 1.35rem; margin: 0.7em 0 1rem; }
+    .digest-reading li { margin: 0.52em 0; }
+    .digest-reading hr { margin: 1.85rem 0; opacity: 0.52; border: 0; border-top: 1px solid var(--border); }
+    .digest-reading code {
+      font-size: 0.9em;
+      background: rgba(239, 228, 212, 0.75);
+      padding: 0.12em 0.38em;
+      border-radius: 5px;
+      font-feature-settings: "tnum";
+    }
+    .digest-reading pre {
+      white-space: pre-wrap;
+      background: rgba(255, 250, 240, 0.9);
+      border: 1px solid rgba(223, 207, 181, 0.8);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .hero .digest-file-hint {
+      margin: 12px 0 0;
+      font-size: 0.87rem;
+      color: rgba(103, 93, 82, 0.95);
+      line-height: 1.45;
+    }
+"""
+        if digest_article
+        else ""
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -4662,6 +4075,7 @@ def render_report_html(path: Path) -> str:
       border-radius: 18px;
       padding: 16px;
     }}
+{digest_extra_css}
   </style>
 </head>
 <body>
@@ -4672,14 +4086,14 @@ def render_report_html(path: Path) -> str:
       <a href="/raw/{quote(path.name)}">Raw markdown</a>
     </div>
     <section class="hero">
-      <span class="eyebrow">{html.escape(metadata["label"])}</span>
-      <h1>{html.escape(path.name)}</h1>
+      <span class="eyebrow">{eyebrow_txt}</span>
+      <h1>{hero_title_txt}</h1>
+      {hero_file_hint}
       <div class="meta">
-        <span>{html.escape(metadata["scope"])}</span>
-        <span>{html.escape(metadata["timestamp_label"])}</span>
+        {meta_spans_html}
       </div>
     </section>
-    <section class="content">
+    <section class="{content_class}">
       {rendered}
     </section>
   </main>
@@ -4687,21 +4101,35 @@ def render_report_html(path: Path) -> str:
 </html>"""
 
 
-def render_error_html(message: str) -> str:
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Not Found</title>
-</head>
-<body>
-  <main>
-    <p>{html.escape(message)}</p>
-    <p><a href="/">Back to report index</a></p>
-  </main>
-</body>
-</html>"""
+def render_error_html(
+    message: str,
+    *,
+    db_path: Path | None = None,
+    user_id: str | None = None,
+) -> str:
+    uid = user_id or DEFAULT_DASHBOARD_USER_ID
+    lang = profile_html_lang(db_path, user_id=uid) if db_path is not None else "en"
+    inner = f"""
+    <div class="detail-body">
+    <section class="panel hero page-hero">
+      <h1>Something went wrong</h1>
+      <p>{html.escape(message)}</p>
+      <div class="detail-row hero-actions">
+        <a class="action-button" href="/?user_id={quote(uid)}">Dashboard</a>
+        <a href="/actions?user_id={quote(uid)}">Settings &amp; refresh</a>
+      </div>
+    </section>
+    </div>
+    """
+    return render_document(
+        title="Error",
+        html_lang=lang,
+        user_id=uid,
+        nav_active="dashboard",
+        main_inner_html=inner.strip(),
+        main_classes="page-wide detail-body-wrap",
+        omit_glossary_footer=True,
+    )
 
 
 if __name__ == "__main__":

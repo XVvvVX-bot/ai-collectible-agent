@@ -11,7 +11,9 @@ requires-python = ">=3.11"
 authors = [
   { name = "AI Agent Team" }
 ]
-dependencies = []
+dependencies = [
+  "tzdata>=2024.1; platform_system == 'Windows'",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
