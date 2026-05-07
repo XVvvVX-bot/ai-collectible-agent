@@ -46,35 +46,73 @@ def build_signal_review_report(
             raise ValueError(f"user not found: {user_id}")
         signal_rows = conn.execute(
             """
-            SELECT
-              s.signal_type,
-              s.urgency,
-              s.reason_code,
-              s.signal_title,
-              s.signal_summary,
-              s.group_key,
-              s.created_at,
-              s.last_seen_at,
-              i.interest_name
-            FROM signals_v2 s
-            JOIN user_interests_v2 i ON i.id = s.interest_id
-            WHERE s.user_id = ? AND s.status = 'active' AND s.last_seen_at >= ?
+            WITH ranked AS (
+              SELECT
+                s.id, s.listing_id, s.signal_type, s.urgency, s.reason_code,
+                s.signal_title, s.signal_summary, s.group_key,
+                s.created_at, s.last_seen_at,
+                i.interest_name,
+                CASE
+                  WHEN s.listing_id IS NULL THEN 1
+                  ELSE ROW_NUMBER() OVER (
+                    PARTITION BY s.listing_id, s.signal_type
+                    ORDER BY
+                      CASE s.urgency WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+                      s.created_at,
+                      s.id
+                  )
+                END AS rn
+              FROM signals_v2 s
+              JOIN user_interests_v2 i ON i.id = s.interest_id
+              WHERE s.user_id = ? AND s.status = 'active' AND s.last_seen_at >= ?
+            )
+            SELECT signal_type, urgency, reason_code, signal_title, signal_summary,
+                   group_key, created_at, last_seen_at, interest_name, listing_id
+            FROM ranked
+            WHERE rn = 1
             ORDER BY
-              CASE s.urgency WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
-              s.last_seen_at DESC,
-              i.interest_name,
-              s.signal_type
+              CASE urgency WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+              last_seen_at DESC,
+              interest_name,
+              signal_type
             """,
             (user_id, since_iso),
         ).fetchall()
+        dup_rows = conn.execute(
+            """
+            SELECT s.listing_id, s.signal_type,
+                   GROUP_CONCAT(i.interest_name, '||') AS interest_names
+            FROM signals_v2 s
+            JOIN user_interests_v2 i ON i.id = s.interest_id
+            WHERE s.user_id = ? AND s.status = 'active' AND s.last_seen_at >= ?
+              AND s.listing_id IS NOT NULL
+            GROUP BY s.listing_id, s.signal_type
+            HAVING COUNT(*) > 1
+            """,
+            (user_id, since_iso),
+        ).fetchall()
+        dup_map: dict[tuple[str, str], list[str]] = {}
+        for r in dup_rows:
+            names_raw = str(r["interest_names"] or "")
+            names = [n for n in names_raw.split("||") if n]
+            dup_map[(str(r["listing_id"]), str(r["signal_type"]))] = names
 
     timestamp = current_utc.replace(microsecond=0).isoformat().replace(":", "").replace("-", "").replace("+00:00", "Z")
     report_path = out_dir / f"v2_signal_review_{user_id}_{timestamp}.md"
-    report_path.write_text(_render_report(dict(user_row), signal_rows, lookback_hours=lookback_hours), encoding="utf-8")
+    report_path.write_text(
+        _render_report(dict(user_row), signal_rows, lookback_hours=lookback_hours, dup_map=dup_map),
+        encoding="utf-8",
+    )
     return SignalReviewReportResult(report_path=str(report_path), user_id=user_id, signal_count=len(signal_rows))
 
 
-def _render_report(user: dict[str, str], signal_rows: list[sqlite3.Row], *, lookback_hours: int) -> str:
+def _render_report(
+    user: dict[str, str],
+    signal_rows: list[sqlite3.Row],
+    *,
+    lookback_hours: int,
+    dup_map: dict[tuple[str, str], list[str]] | None = None,
+) -> str:
     event_rows = [row for row in signal_rows if str(row["signal_type"]) in EVENT_SIGNAL_TYPES]
     standing_rows = [row for row in signal_rows if str(row["signal_type"]) not in EVENT_SIGNAL_TYPES]
     lines = [
@@ -92,12 +130,17 @@ def _render_report(user: dict[str, str], signal_rows: list[sqlite3.Row], *, look
         lines.append("No active signals in the current review window.")
         return "\n".join(lines).rstrip() + "\n"
 
-    lines.extend(_render_signal_section("New Event Signals", event_rows))
-    lines.extend(_render_signal_section("Standing Signals", standing_rows))
+    lines.extend(_render_signal_section("New Event Signals", event_rows, dup_map=dup_map or {}))
+    lines.extend(_render_signal_section("Standing Signals", standing_rows, dup_map=dup_map or {}))
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _render_signal_section(title: str, signal_rows: list[sqlite3.Row]) -> list[str]:
+def _render_signal_section(
+    title: str,
+    signal_rows: list[sqlite3.Row],
+    *,
+    dup_map: dict[tuple[str, str], list[str]],
+) -> list[str]:
     lines = [f"## {title}", ""]
     if not signal_rows:
         lines.append("- none")
@@ -116,5 +159,19 @@ def _render_signal_section(title: str, signal_rows: list[sqlite3.Row]) -> list[s
             f"- `{row['urgency']}` | `{row['signal_type']}` | {row['signal_title']} | "
             f"{row['signal_summary']} | first seen `{row['created_at']}` | last seen `{row['last_seen_at']}`"
         )
+        listing_id = row["listing_id"] if "listing_id" in row.keys() else None
+        if listing_id is not None:
+            others = [
+                name
+                for name in dup_map.get((str(listing_id), str(row["signal_type"])), [])
+                if name != row["interest_name"]
+            ]
+            if others:
+                shown = others[:3]
+                extra = len(others) - len(shown)
+                names = ", ".join(f"\"{n}\"" for n in shown)
+                if extra > 0:
+                    names += f" and {extra} more"
+                lines.append(f"  - _also from {names}_")
     lines.extend(["", ""])
     return lines

@@ -265,8 +265,18 @@ def _load_recent_ended_stamp_comps(conn: sqlite3.Connection, row: sqlite3.Row) -
           n.price_end,
           n.character_name_raw,
           n.end_at,
+          p.parse_family,
           p.issue_code_norm,
-          p.issue_name
+          p.issue_name,
+          p.year_value,
+          p.theme_name,
+          p.asset_type,
+          p.finish_type,
+          p.weight_text,
+          p.denomination_text,
+          p.variant_tokens_json,
+          p.condition_tokens_json,
+          p.quantity_tokens_json
         FROM market_listings_norm_v2 n
         JOIN listing_parse_v2 p ON p.listing_id = n.id
         WHERE {' AND '.join(where_clauses)}
@@ -305,9 +315,18 @@ def _load_recent_ended_coin_comps(conn: sqlite3.Connection, row: sqlite3.Row) ->
           n.price_end,
           n.character_name_raw,
           n.end_at,
+          p.parse_family,
+          p.issue_code_norm,
+          p.issue_name,
           p.year_value,
           p.theme_name,
-          p.asset_type
+          p.asset_type,
+          p.finish_type,
+          p.weight_text,
+          p.denomination_text,
+          p.variant_tokens_json,
+          p.condition_tokens_json,
+          p.quantity_tokens_json
         FROM market_listings_norm_v2 n
         JOIN listing_parse_v2 p ON p.listing_id = n.id
         WHERE {' AND '.join(where_clauses)}
