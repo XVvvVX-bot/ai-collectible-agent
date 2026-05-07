@@ -2043,11 +2043,11 @@ def render_actions_html(
     inner = f"""
     <div class="detail-body">
     <section class="hero page-hero">
-      <span class="eyebrow">Settings &amp; refresh</span>
+      <span class="eyebrow">Actions</span>
       <h1>{html.escape(str(user["display_name"]))}</h1>
       <p>Refresh matches when the market changes, regenerate alerts after big updates, or rebuild your digest for a fresh read. These steps run on the server and may take up to a minute.</p>
       <div class="chip-row">
-        <span class="chip">Saved interests <strong>{summary.get("active_interest_count", 0)}</strong></span>
+        <span class="chip">Interests <strong>{summary.get("active_interest_count", 0)}</strong></span>
         <span class="chip">Matches <strong>{summary.get("active_match_count", 0)}</strong></span>
         <span class="chip">Alerts <strong>{summary.get("active_signal_count", 0)}</strong></span>
       </div>
@@ -2153,7 +2153,7 @@ def render_action_result_html(
         anchors = [
             f'<a class="action-button" href="/matches?user_id={quote(user_id)}">Open matches</a>',
             f'<a href="/?user_id={quote(user_id)}">Dashboard</a>',
-            f'<a href="/actions?user_id={quote(user_id)}">Settings &amp; refresh</a>',
+            f'<a href="/actions?user_id={quote(user_id)}">Actions</a>',
         ]
         if show_app_dev_ui():
             anchors.append(f'<a href="/api/users/{quote(user_id)}/matches">Matches JSON</a>')
@@ -2167,7 +2167,7 @@ def render_action_result_html(
         summary_html = f"""<p>Generated <strong>{ins}</strong> new alerts and updated <strong>{upd}</strong> existing ones.</p><p class="signal-note">Window: last <strong>{html.escape(str(lookback_hours))}h</strong> of activity.</p>"""
         anchors = [
             f'<a class="action-button" href="/?user_id={quote(user_id)}#signals">Open alerts inbox</a>',
-            f'<a href="/actions?user_id={quote(user_id)}">Settings &amp; refresh</a>',
+            f'<a href="/actions?user_id={quote(user_id)}">Actions</a>',
             f'<a href="/?user_id={quote(user_id)}">Dashboard</a>',
         ]
         if show_app_dev_ui():
@@ -2186,7 +2186,7 @@ def render_action_result_html(
         )
         anchors = [
             f'<a class="action-button" href="{html.escape(rendered_href)}">Open readable digest</a>',
-            f'<a href="/actions?user_id={quote(user_id)}">Settings &amp; refresh</a>',
+            f'<a href="/actions?user_id={quote(user_id)}">Actions</a>',
             f'<a href="/?user_id={quote(user_id)}">Dashboard</a>',
         ]
         if show_app_dev_ui():
@@ -2623,7 +2623,7 @@ def render_interest_save_result_html(
       {render_interest_refresh_summary(refresh, user_id=user_id)}
       <div class="detail-row hero-actions">
         <a class="action-button" href="/interests/edit?user_id={quote(user_id)}&interest_id={quote(interest_id)}">Keep editing</a>
-        <a href="/interests?user_id={quote(user_id)}">Saved interests</a>
+        <a href="/interests?user_id={quote(user_id)}">Interests</a>
         <a href="/?user_id={quote(user_id)}">Dashboard</a>
       </div>
     </section>
@@ -2664,8 +2664,8 @@ def render_interest_create_result_html(
       {render_interest_refresh_summary(refresh, user_id=user_id)}
       <div class="detail-row hero-actions">
         <a class="action-button" href="/interests/edit?user_id={quote(user_id)}&interest_id={quote(interest_id)}">Fine-tune</a>
-        <a href="/actions?user_id={quote(user_id)}">Settings &amp; refresh</a>
-        <a href="/interests?user_id={quote(user_id)}">Saved interests</a>
+        <a href="/actions?user_id={quote(user_id)}">Actions</a>
+        <a href="/interests?user_id={quote(user_id)}">Interests</a>
         <a href="/?user_id={quote(user_id)}">Dashboard</a>
       </div>
     </section>
@@ -2706,7 +2706,7 @@ def render_interest_delete_result_html(
       {render_interest_refresh_summary(refresh, user_id=user_id)}
       <div class="detail-row hero-actions">
         <a class="action-button" href="/interests/new?user_id={quote(user_id)}">Add another</a>
-        <a href="/interests?user_id={quote(user_id)}">Saved interests</a>
+        <a href="/interests?user_id={quote(user_id)}">Interests</a>
         <a href="/?user_id={quote(user_id)}">Dashboard</a>
       </div>
     </section>
@@ -2828,9 +2828,9 @@ def render_dashboard_html(
     <section class="hero" id="overview">
       <div class="hero-grid">
         <div>
-          <span class="eyebrow">Your collector home</span>
+          <span class="eyebrow">Collector dashboard</span>
           <h1>{html.escape(str(user["display_name"]))}</h1>
-          <p>Alerts and live matches appear first. Use <strong>Saved interests</strong> to tune what we watch, and <strong>Settings &amp; refresh</strong> when you want to update data on demand.</p>
+          <p>Alerts and live matches appear first. Use <strong>Interests</strong> to tune what we watch, and <strong>Actions</strong> when you want to refresh data on demand.</p>
           <details class="identity-advanced">
             <summary>Account details</summary>
             <p>Language {html.escape(str(user["language"]))} · Time zone {html.escape(str(user["timezone"]))}</p>
@@ -2838,13 +2838,13 @@ def render_dashboard_html(
           </details>
         </div>
         <aside class="hero-side">
-          <span class="eyebrow">Daily digest</span>
+          <span class="eyebrow">Latest digest</span>
           <h3>{html.escape(str(latest_digest.get("timestamp_label") or "—"))}</h3>
-          <p><a class="action-button" style="display:inline-flex;margin-top:8px;" href="{html.escape(digest_primary)}">{html.escape(digest_title)}</a></p>
-          <p class="signal-note" style="margin-top:12px;">Editorial summary of recent activity. Full preview is below.</p>
+          <p><a class="action-button" style="display:inline-flex;margin-top:8px;" href="{html.escape(digest_primary)}">Read digest</a></p>
+          <p class="signal-note" style="margin-top:12px;">Your latest editorial summary of recent market activity.</p>
           <div class="subtle-links">
             <a href="/matches?user_id={quote(user_id)}">Browse matches</a>
-            <a href="/actions?user_id={quote(user_id)}">Settings &amp; refresh</a>
+            <a href="/actions?user_id={quote(user_id)}">Refresh data</a>
           </div>
         </aside>
       </div>
@@ -2854,7 +2854,7 @@ def render_dashboard_html(
       <div class="section-header">
         <div>
           <h2>Alerts to review</h2>
-          <p>Notices derived from your saved interests and the current market. We show a short list here; open <strong>Settings &amp; refresh</strong> to regenerate.</p>
+          <p>Notices derived from your saved interests and the current market. We show a short list here; open <strong>Actions</strong> to regenerate.</p>
         </div>
         <div class="subtle-links">
           <a href="/actions?user_id={quote(user_id)}">Update alerts</a>
@@ -2879,7 +2879,7 @@ def render_dashboard_html(
 
     <section class="summary-grid" aria-label="At a glance">
       <article class="summary-card">
-        <span class="eyebrow">Saved interests</span>
+        <span class="eyebrow">Interests</span>
         <strong>{summary["active_interest_count"]}</strong>
       </article>
       <article class="summary-card">
@@ -3141,7 +3141,7 @@ def render_interests_html(
     inner = f"""
     <div class="detail-body">
     <section class="hero page-hero">
-      <span class="eyebrow">Saved interests</span>
+      <span class="eyebrow">Interests</span>
       <h1>{html.escape(str(user["display_name"]))}</h1>
       <p>Everything we watch on your behalf lives here—targets you care about, optional holdings you track, and how often we should ping you.</p>
       <details class="identity-advanced">
@@ -3151,11 +3151,11 @@ def render_interests_html(
       </details>
       <div class="hero-actions">
         <a class="action-button" href="/interests/new?user_id={quote(user_id)}">Add interest</a>
-        <a href="/actions?user_id={quote(user_id)}">Settings &amp; refresh</a>
+        <a href="/actions?user_id={quote(user_id)}">Actions</a>
       </div>
     </section>
     <section class="summary-grid" aria-label="Overview counts">
-      <article class="summary-card"><span class="eyebrow">Saved interests</span><strong>{summary.get("active_interest_count", 0)}</strong></article>
+      <article class="summary-card"><span class="eyebrow">Interests</span><strong>{summary.get("active_interest_count", 0)}</strong></article>
       <article class="summary-card"><span class="eyebrow">Targets</span><strong>{summary.get("active_target_count", 0)}</strong></article>
       <article class="summary-card"><span class="eyebrow">Tracked holdings</span><strong>{summary.get("active_holding_count", 0)}</strong></article>
       <article class="summary-card"><span class="eyebrow">Marked high priority</span><strong>{summary.get("high_priority_count", 0)}</strong></article>
@@ -3184,7 +3184,7 @@ def render_interests_html(
     </div>
     """
     return render_document(
-        title="Saved interests",
+        title="Interests",
         html_lang=lang,
         user_id=user_id,
         nav_active="interests",
@@ -3714,9 +3714,38 @@ _DIGEST_HEADING_SWAP = {
 }
 
 
+_COMP_NOISE_RE = re.compile(
+    r"\s*using\s+`?\d+`?\s+of\s+`?\d+`?\s+ended\s+comps\s+on\s+`?[^`(]+`?\s+basis\s*"
+    r"\(\s*`?\d+`?\s+exact.*?\)"
+)
+_SEED_ROW_RE = re.compile(r"\s*Seed row\s+source_listing_id=\S+\s+overall=\d+\s+ended=\d+\.?")
+_COMP_TREND_LINE_RE = re.compile(r"^-\s*Comp trend:.*$", re.MULTILINE)
+_RELATIONSHIP_MIX_RE = re.compile(r"^Relationship mix:.*$", re.MULTILINE)
+_KIND_SCOPE_LINE_RE = re.compile(r"^-\s*Kind\s*/\s*scope\s*/\s*precision:.*$", re.MULTILINE)
+_POLICY_LINE_RE = re.compile(r"^-\s*Policy:\s*delivery.*$", re.MULTILINE)
+_CONDITION_MODE_RE = re.compile(r"^-\s*Condition mode:.*$", re.MULTILINE)
+
+
+def _simplify_digest_line(line: str) -> str:
+    """Remove verbose comp-basis noise and seed-row metadata from a single line."""
+    line = _COMP_NOISE_RE.sub("", line)
+    line = _SEED_ROW_RE.sub("", line)
+    line = line.replace("comp-trend estimate", "trend")
+    line = line.replace("weighted ended trend", "trend")
+    line = line.replace("has recent ended comps around", "recent comps around")
+    return line.rstrip()
+
+
 def humanize_digest_markdown(markdown: str, *, omit_leading_digest_title: bool = False) -> str:
-    """Friendlier headings; optionally drop duplicated title when rendered in page hero."""
-    lines = markdown.splitlines()
+    """Simplify technical jargon and strip noise so the digest reads like an editorial note."""
+    text = markdown
+    text = _COMP_TREND_LINE_RE.sub("", text)
+    text = _RELATIONSHIP_MIX_RE.sub("", text)
+    text = _KIND_SCOPE_LINE_RE.sub("", text)
+    text = _POLICY_LINE_RE.sub("", text)
+    text = _CONDITION_MODE_RE.sub("", text)
+
+    lines = text.splitlines()
     if omit_leading_digest_title and lines:
         strip0 = lines[0].strip()
         if strip0 == "# V2 Interest Daily Digest" or strip0 == "# Your daily digest":
@@ -3731,12 +3760,22 @@ def humanize_digest_markdown(markdown: str, *, omit_leading_digest_title: bool =
             s = "# Your daily digest"
         elif stripped in _DIGEST_HEADING_SWAP:
             s = _DIGEST_HEADING_SWAP[stripped]
+        s = _simplify_digest_line(s)
+        if not s.strip():
+            if out and not out[-1].strip():
+                continue
         out.append(s)
     return "\n".join(out)
 
 
+_META_SKIP_PREFIXES = (
+    "User:", "Language", "Default precision", "Default min score",
+    "Lookback window",
+)
+
+
 def extract_digest_leading_bullets(markdown: str) -> tuple[list[str], str]:
-    """Pull the opening metadata bullet list away from prose so it can render as a summary strip."""
+    """Pull useful metadata bullets; skip noisy technical lines."""
     lines = markdown.splitlines()
     idx = 0
     while idx < len(lines) and not lines[idx].strip():
@@ -3745,7 +3784,10 @@ def extract_digest_leading_bullets(markdown: str) -> tuple[list[str], str]:
     while idx < len(lines):
         stripped = lines[idx].strip()
         if stripped.startswith("- ") or stripped.startswith("* "):
-            bullets.append(stripped[2:])
+            payload = stripped[2:].strip()
+            skip = any(payload.startswith(p) for p in _META_SKIP_PREFIXES)
+            if not skip and payload:
+                bullets.append(payload)
             idx += 1
             continue
         break
@@ -3992,28 +4034,34 @@ def render_report_html(path: Path) -> str:
     digest_article = metadata.get("kind") == "interest_digest_user"
     rendered = render_digest_structured_html(markdown_source) if digest_article else render_markdown_html(markdown_source)
     eyebrow_txt = html.escape(metadata["label"])
-    hero_title_txt = html.escape(
-        f"Your daily digest · {metadata['timestamp_label']}" if digest_article else path.name,
+    hero_title = (
+        f"Your daily digest · {metadata['timestamp_label']}" if digest_article else metadata.get("label", path.name)
     )
     meta_scope = html.escape(metadata["scope"])
-    hero_file_hint = (
-        f'<p class="digest-file-hint">{html.escape(path.name)}</p>' if digest_article else ""
-    )
+    raw_link = f' · <a href="/raw/{quote(path.name)}">Raw markdown</a>' if show_app_dev_ui() else ""
     meta_spans_html = (
-        f'<span>{meta_scope}</span>'
+        f'<span class="chip">{meta_scope}</span>'
         if digest_article
-        else f'<span>{meta_scope}</span><span>{html.escape(metadata["timestamp_label"])}</span>'
+        else f'<span class="chip">{meta_scope}</span><span class="chip">{html.escape(metadata["timestamp_label"])}</span>'
     )
-    content_class = "content digest-reading" if digest_article else "content"
-    digest_extra_css = (
-        """
-    .digest-reading {
-      font-size: 1.05rem;
-      line-height: 1.74;
-      letter-spacing: 0.01em;
-      max-width: 42rem;
-      margin-inline: auto;
-    }
+    content_class = "digest-reading" if digest_article else ""
+    inner = f"""
+    <div class="detail-body">
+      <section class="panel hero page-hero">
+        <span class="eyebrow">{eyebrow_txt}</span>
+        <h1>{html.escape(hero_title)}</h1>
+        <div class="chip-row">{meta_spans_html}</div>
+        <div class="subtle-links" style="margin-top:12px;">
+          <a href="/?user_id={quote(DEFAULT_DASHBOARD_USER_ID)}">Back to dashboard</a>{raw_link}
+        </div>
+      </section>
+      <section class="panel {content_class}">
+        {rendered}
+      </section>
+    </div>
+    """
+    report_extra_css = """
+    .digest-reading { font-size: 1.05rem; line-height: 1.74; letter-spacing: 0.01em; }
     .digest-reading aside.digest-doc-meta {
       background: rgba(253, 250, 244, 0.95);
       border: 1px solid rgba(223, 207, 181, 0.85);
@@ -4023,232 +4071,56 @@ def render_report_html(path: Path) -> str:
       margin: 0 0 26px;
     }
     .digest-reading aside.digest-doc-meta > p:first-child {
-      margin: 0 0 12px;
-      font-size: 0.94rem;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
+      margin: 0 0 12px; font-size: 0.94rem; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
     }
-    .digest-reading aside.digest-doc-meta ul {
-      margin: 0;
-      padding-left: 1.2rem;
-    }
-    .digest-reading aside.digest-doc-meta li {
-      margin: 0.5em 0;
-      padding-left: 0.35em;
-    }
+    .digest-reading aside.digest-doc-meta ul { margin: 0; padding-left: 1.2rem; }
+    .digest-reading aside.digest-doc-meta li { margin: 0.5em 0; padding-left: 0.35em; }
     .digest-at-a-glance {
       background: rgba(255, 252, 246, 0.94);
       border: 1px solid rgba(223, 207, 181, 0.8);
-      border-radius: 16px;
-      padding: 16px 18px;
-      margin: 0 0 22px;
+      border-radius: 16px; padding: 16px 18px; margin: 0 0 22px;
     }
-    .digest-at-a-glance h2 {
-      margin: 0 0 10px;
-      border: 0;
-      padding: 0;
-      font-size: 1.15rem;
-    }
+    .digest-at-a-glance h2 { margin: 0 0 10px; border: 0; padding: 0; font-size: 1.15rem; }
     .digest-at-a-glance ul { margin: 0; padding-left: 1.2rem; }
     .digest-interest-cards { display: grid; gap: 16px; }
     .digest-interest-card {
       background: rgba(255, 252, 246, 0.96);
       border: 1px solid rgba(223, 207, 181, 0.9);
-      border-radius: 16px;
-      padding: 16px 18px;
+      border-radius: 16px; padding: 16px 18px;
     }
     .digest-interest-card h3 { margin: 0 0 10px; font-size: 1.18rem; }
     .digest-summary {
-      margin: 0 0 12px;
-      padding: 10px 12px;
-      border-radius: 10px;
+      margin: 0 0 12px; padding: 10px 12px; border-radius: 10px;
       background: rgba(244, 230, 213, 0.55);
-      border: 1px solid rgba(223, 207, 181, 0.85);
-      font-size: 0.98rem;
+      border: 1px solid rgba(223, 207, 181, 0.85); font-size: 0.98rem;
     }
     .digest-key-facts { margin: 0; padding-left: 1.2rem; }
     .digest-groups { margin-top: 12px; display: grid; gap: 10px; }
     .digest-detail-group {
       border: 1px solid rgba(223, 207, 181, 0.75);
-      border-radius: 10px;
-      background: rgba(255, 255, 255, 0.6);
+      border-radius: 10px; background: rgba(255, 255, 255, 0.6);
       padding: 8px 10px;
     }
     .digest-detail-group summary { cursor: pointer; font-weight: 600; }
     .digest-detail-group ul { margin-top: 8px; }
     .digest-muted { color: var(--muted); margin: 0; }
-    .digest-reading h2 {
-      margin: 2.1rem 0 0.9rem;
-      padding-bottom: 0.35em;
-      border-bottom: 1px solid var(--border);
-      font-weight: 700;
-    }
-    .digest-reading h3 {
-      margin: 1.65rem 0 0.6rem;
-      font-size: 1.18rem;
-      color: rgba(53, 45, 35, 0.95);
-    }
+    .digest-reading h2 { margin: 2.1rem 0 0.9rem; padding-bottom: 0.35em; border-bottom: 1px solid var(--border); font-weight: 700; }
+    .digest-reading h3 { margin: 1.65rem 0 0.6rem; font-size: 1.18rem; color: rgba(53, 45, 35, 0.95); }
     .digest-reading p { margin: 0.95em 0; }
     .digest-reading ul, .digest-reading ol { padding-left: 1.35rem; margin: 0.7em 0 1rem; }
     .digest-reading li { margin: 0.52em 0; }
     .digest-reading hr { margin: 1.85rem 0; opacity: 0.52; border: 0; border-top: 1px solid var(--border); }
-    .digest-reading code {
-      font-size: 0.9em;
-      background: rgba(239, 228, 212, 0.75);
-      padding: 0.12em 0.38em;
-      border-radius: 5px;
-      font-feature-settings: "tnum";
-    }
-    .digest-reading pre {
-      white-space: pre-wrap;
-      background: rgba(255, 250, 240, 0.9);
-      border: 1px solid rgba(223, 207, 181, 0.8);
-      border-radius: 12px;
-      padding: 14px;
-    }
-    .hero .digest-file-hint {
-      margin: 12px 0 0;
-      font-size: 0.87rem;
-      color: rgba(103, 93, 82, 0.95);
-      line-height: 1.45;
-    }
-"""
-        if digest_article
-        else ""
+    """
+    return render_document(
+        title=hero_title,
+        html_lang="en",
+        user_id=DEFAULT_DASHBOARD_USER_ID,
+        nav_active="report",
+        main_inner_html=inner.strip(),
+        extra_css=report_extra_css.strip(),
+        main_classes="page-wide",
     )
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{html.escape(path.name)}</title>
-  <style>
-    :root {{
-      --bg: #f4efe6;
-      --panel: rgba(255, 250, 243, 0.92);
-      --border: #dfcfb5;
-      --ink: #21242a;
-      --muted: #675d52;
-      --accent: #8d3a12;
-      --shadow: 0 24px 60px rgba(97, 67, 33, 0.08);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      font-family: "Avenir Next", "Segoe UI Variable", "Trebuchet MS", sans-serif;
-      margin: 0;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at top left, rgba(181, 118, 52, 0.13), transparent 30%),
-        linear-gradient(180deg, #f7f2ea 0%, var(--bg) 100%);
-    }}
-    main {{ max-width: 980px; margin: 0 auto; padding: 30px 20px 60px; }}
-    .topbar {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      align-items: center;
-      margin-bottom: 18px;
-      color: var(--muted);
-    }}
-    a {{ color: var(--accent); text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    .hero {{
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 28px;
-      padding: 24px;
-      box-shadow: var(--shadow);
-      margin-bottom: 20px;
-    }}
-    .hero h1 {{
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: clamp(2rem, 3.6vw, 3rem);
-      margin: 8px 0 10px;
-      letter-spacing: -0.04em;
-    }}
-    .eyebrow {{
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: var(--muted);
-      font-size: 0.78rem;
-    }}
-    .meta {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 16px;
-    }}
-    .meta span {{
-      padding: 8px 12px;
-      border-radius: 999px;
-      border: 1px solid var(--border);
-      background: #fff9ef;
-      color: var(--muted);
-      font-size: 0.92rem;
-    }}
-    .content {{
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 28px;
-      padding: 26px;
-      box-shadow: var(--shadow);
-    }}
-    .content h1, .content h2, .content h3 {{
-      font-family: Georgia, "Times New Roman", serif;
-      line-height: 1.15;
-      margin: 1.4em 0 0.55em;
-    }}
-    .content h1:first-child {{ margin-top: 0; }}
-    .content p, .content li {{
-      line-height: 1.72;
-      font-size: 1.03rem;
-    }}
-    .content ul {{ padding-left: 1.3rem; }}
-    .content hr {{
-      border: 0;
-      border-top: 1px solid var(--border);
-      margin: 26px 0;
-    }}
-    code {{
-      font-family: "JetBrains Mono", "Cascadia Code", monospace;
-      background: #efe4d4;
-      padding: 0.1em 0.35em;
-      border-radius: 6px;
-      font-size: 0.92em;
-    }}
-    pre {{
-      white-space: pre-wrap;
-      overflow-x: auto;
-      background: #fff9ef;
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 16px;
-    }}
-{digest_extra_css}
-  </style>
-</head>
-<body>
-  <main>
-    <div class="topbar">
-      <a href="/">Back to report index</a>
-      <span>|</span>
-      <a href="/raw/{quote(path.name)}">Raw markdown</a>
-    </div>
-    <section class="hero">
-      <span class="eyebrow">{eyebrow_txt}</span>
-      <h1>{hero_title_txt}</h1>
-      {hero_file_hint}
-      <div class="meta">
-        {meta_spans_html}
-      </div>
-    </section>
-    <section class="{content_class}">
-      {rendered}
-    </section>
-  </main>
-</body>
-</html>"""
 
 
 def render_error_html(
@@ -4266,7 +4138,7 @@ def render_error_html(
       <p>{html.escape(message)}</p>
       <div class="detail-row hero-actions">
         <a class="action-button" href="/?user_id={quote(uid)}">Dashboard</a>
-        <a href="/actions?user_id={quote(uid)}">Settings &amp; refresh</a>
+        <a href="/actions?user_id={quote(uid)}">Actions</a>
       </div>
     </section>
     </div>

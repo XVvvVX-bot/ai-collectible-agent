@@ -596,15 +596,17 @@ def render_skip_link(target_id: str = "main-content") -> str:
 
 
 def render_primary_nav(user_id: str, *, active: str) -> str:
-    """active: dashboard | settings | interests | matches"""
+    """Unified top-level nav for every page.
+
+    active: dashboard | matches | interests | settings | report
+    """
     q = user_q(user_id)
     dash = f"/{q}"
     specs = (
-        ("dashboard", dash, "Dashboard"),
-        ("alerts", f"{dash}#signals", "Alerts"),
+        ("dashboard", dash, "Home"),
         ("matches", f"/matches{q}", "Matches"),
-        ("interests", f"/interests{q}", "Saved interests"),
-        ("settings", f"/actions{q}", "Settings & refresh"),
+        ("interests", f"/interests{q}", "Interests"),
+        ("settings", f"/actions{q}", "Actions"),
     )
     pieces: list[str] = []
     for key, href, label in specs:
@@ -723,16 +725,14 @@ def render_optional_matches_json_link(user_id: str) -> str:
 
 
 def render_dashboard_anchor_nav(user_id: str) -> str:
-    base_path = "/?user_id=" + quote(user_id, safe="")
+    """In-page jump links for the dashboard's own sections."""
     items = (
-        ("#overview", "Overview"),
         ("#signals", "Alerts"),
-        ("#matches-preview", "Match preview"),
+        ("#matches-preview", "Matches"),
         ("#digest-region", "Digest"),
         ("#reports-region", "Reports"),
     )
     parts = []
     for frag, label in items:
-        full_href = f"{base_path}{frag}"
-        parts.append(f'<a href="{html.escape(full_href)}">{html.escape(label)}</a>')
+        parts.append(f'<a href="{html.escape(frag)}">{html.escape(label)}</a>')
     return f'<nav class="dashboard-toc" aria-label="On this page">{"".join(parts)}</nav>'
