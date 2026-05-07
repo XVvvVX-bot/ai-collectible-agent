@@ -1,3 +1,12 @@
+Metadata-Version: 2.4
+Name: ai-collectibles-agent
+Version: 0.1.0
+Summary: AI Collectibles Intelligence Agent (Zhaoonline-first, multi-source-ready)
+Author: AI Agent Team
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: tzdata>=2024.1; platform_system == "Windows"
+
 # AI Collectibles Intelligence Agent
 
 Collectibles intelligence system focused on market monitoring, structured matching, and alert/report generation.
@@ -82,12 +91,6 @@ cd "F:\AI Agent"
 .\.venv\Scripts\python.exe .\scripts_v2\orchestration\seed_v2_demo_user.py
 ```
 
-Fully local demo (**UTF-8 market fixtures + curated profile + matching + signals**), no upstream sync needed:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts_v2\orchestration\bootstrap_v2_demo_stack.py --db-path data/agent_v2.db
-```
-
 Run one live V2 incremental window:
 
 ```powershell
@@ -110,21 +113,6 @@ Run the combined V2 report service / dashboard locally:
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts_v2\orchestration\run_v2_report_service.py --runtime-root runtime --timezone Asia/Shanghai
-```
-
-Same entrypoint runs on Render (`render.yaml`); locally you typically also pass **`--db-path data/agent_v2.db`** so the dashboard uses the same database as `run_v2_incremental_cycle.py` / matching scripts above. Put your Zhao secret in **`data/secrets/zhaoonline_secret.txt`** (single line), or export **`ZHAO_V2_SECRET`**. Optionally match Render’s **`ZHAO_V2_BASE_URL`** with **`--base-url http://zhaoonline.hk:8888`**. Listening only on localhost: **`--host 127.0.0.1 --port 10000`**.
-
-Example (local browsing at `http://127.0.0.1:10000/`):
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts_v2\orchestration\run_v2_report_service.py `
-  --runtime-root runtime `
-  --timezone Asia/Shanghai `
-  --host 127.0.0.1 `
-  --port 10000 `
-  --db-path data/agent_v2.db `
-  --secret-file data/secrets/zhaoonline_secret.txt `
-  --base-url http://zhaoonline.hk:8888
 ```
 
 Register the Windows scheduled live incremental task:

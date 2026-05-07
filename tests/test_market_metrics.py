@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ai_agent.metrics.market_metrics import run_market_metrics
 from ai_agent.storage.sqlite_raw_store import SqliteRawStore
+
+
+def _days_ago(n: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=n)).isoformat()
 
 
 def _insert_listing(
@@ -66,7 +71,7 @@ def test_market_metrics_marks_limited_history_as_temporary(tmp_path: Path):
             category_norm="stamp",
             series_norm="t46",
             title="Monkey Ticket",
-            observed_at="2026-03-06T00:00:00+00:00",
+            observed_at=_days_ago(5),
             price_current=100.0,
         )
         _insert_listing(
@@ -75,7 +80,7 @@ def test_market_metrics_marks_limited_history_as_temporary(tmp_path: Path):
             category_norm="stamp",
             series_norm="t46",
             title="Monkey Ticket",
-            observed_at="2026-03-07T00:00:00+00:00",
+            observed_at=_days_ago(4),
             price_current=120.0,
         )
         conn.commit()
@@ -121,7 +126,7 @@ def test_market_metrics_upsert_is_idempotent(tmp_path: Path):
             category_norm="coin",
             series_norm="panda",
             title="1983 Panda 1oz",
-            observed_at="2026-03-07T00:00:00+00:00",
+            observed_at=_days_ago(3),
             price_current=1000.0,
         )
         conn.commit()
