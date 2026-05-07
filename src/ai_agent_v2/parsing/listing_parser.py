@@ -11,7 +11,7 @@ from ai_agent_v2.clients.zhaoonline import now_utc_iso
 from ai_agent_v2.storage.sqlite_store import SqliteV2Store
 
 SOURCE_PLATFORM = "zhaoonline"
-PARSER_VERSION = "v2_title_parser_002"
+PARSER_VERSION = "v2_title_parser_003"
 
 STAMP_CATEGORY_MARKERS = (
     "邮票",
@@ -47,6 +47,8 @@ CODE_PREFIX_MAP = {
 
 STAMP_VARIANT_TOKENS = (
     "小型张",
+    "小全张",
+    "小本票",
     "型张",
     "版张",
     "带厂铭",
@@ -57,16 +59,38 @@ STAMP_VARIANT_TOKENS = (
     "方连",
     "折版",
     "再版",
+    "无齿",
+    "加盖",
     "一版",
     "二版",
     "三版",
     "四版",
+    "五版",
+    "六版",
     "M",
 )
 STAMP_CONDITION_TOKENS = ("新全", "旧全", "盖全", "实寄", "新", "旧", "盖")
 COIN_ASSET_TOKENS = ("纪念钞", "纸币", "银币", "金币", "银章", "金章")
 COIN_FINISH_TOKENS = ("精制", "普制")
-COIN_VARIANT_TOKENS = ("卡册", "原盒", "证书", "连号", "一套", "二枚", "十枚")
+COIN_VARIANT_TOKENS = (
+    "卡册",
+    "原盒",
+    "证书",
+    "连号",
+    "小全套",
+    "大全套",
+    "首日封",
+    "评级币",
+    "原光",
+    "PCGS",
+    "NGC",
+    "一套",
+    "二枚",
+    "十枚",
+)
+
+QUANTITY_UNIT_CHARS = "套枚张件连版份对"
+QUANTITY_RE = re.compile(rf"(?:\d+|[一二三四五六七八九十百千]+)[{QUANTITY_UNIT_CHARS}]")
 
 
 @dataclass(frozen=True)
@@ -163,8 +187,16 @@ def _parse_listing_row(row: sqlite3.Row) -> dict[str, Any]:
     parse_family = _classify_parse_family(raw_title, category_name)
     if parse_family == "stamp_like":
         parsed = _parse_stamp_title(raw_title=raw_title, character_condition=character_condition, description_character=description_character)
+        # If neither tier recovered structural anchors, drop to "other" so the
+        # dashboard renders the raw-title fallback view.
+        if not parsed.get("issue_code_norm") and not parsed.get("issue_name"):
+            parse_family = "other"
+            parsed = _parse_other_title(raw_title=raw_title, character_condition=character_condition, tier_note="unparsed")
     elif parse_family == "coin_like":
         parsed = _parse_coin_title(raw_title=raw_title, character_condition=character_condition, description_character=description_character)
+        if parsed.get("year_value") is None and not parsed.get("theme_name") and not parsed.get("asset_type"):
+            parse_family = "other"
+            parsed = _parse_other_title(raw_title=raw_title, character_condition=character_condition, tier_note="unparsed")
     else:
         parsed = _parse_other_title(raw_title=raw_title, character_condition=character_condition)
     return {
@@ -177,6 +209,33 @@ def _parse_listing_row(row: sqlite3.Row) -> dict[str, Any]:
         "character_condition": character_condition,
         **parsed,
     }
+
+
+def parse_listing_title(
+    *,
+    raw_title: str | None,
+    category_name_raw: str | None = None,
+    character_condition: str | None = None,
+    description_character: str | None = None,
+) -> dict[str, Any]:
+    """Public testing helper: parse a single title without database access.
+
+    Returns the same dict shape as _parse_listing_row minus storage-only keys.
+    """
+    parse_family = _classify_parse_family(raw_title, category_name_raw)
+    if parse_family == "stamp_like":
+        parsed = _parse_stamp_title(raw_title=raw_title, character_condition=character_condition, description_character=description_character)
+        if not parsed.get("issue_code_norm") and not parsed.get("issue_name"):
+            parse_family = "other"
+            parsed = _parse_other_title(raw_title=raw_title, character_condition=character_condition, tier_note="unparsed")
+    elif parse_family == "coin_like":
+        parsed = _parse_coin_title(raw_title=raw_title, character_condition=character_condition, description_character=description_character)
+        if parsed.get("year_value") is None and not parsed.get("theme_name") and not parsed.get("asset_type"):
+            parse_family = "other"
+            parsed = _parse_other_title(raw_title=raw_title, character_condition=character_condition, tier_note="unparsed")
+    else:
+        parsed = _parse_other_title(raw_title=raw_title, character_condition=character_condition)
+    return {"parse_family": parse_family, "raw_title": raw_title, **parsed}
 
 
 def _parse_stamp_title(*, raw_title: str | None, character_condition: str | None, description_character: str | None) -> dict[str, Any]:
@@ -200,12 +259,48 @@ def _parse_stamp_title(*, raw_title: str | None, character_condition: str | None
         if code_prefix_raw != code_prefix_norm:
             notes.append("code_alias_normalized")
 
-    variant_tokens = _extract_known_tokens(working, STAMP_VARIANT_TOKENS)
+    # ---- Strict tier: variants → quantities → conditions, removing each
+    # span as it's found. Variants go first so phrases like "一版" bind
+    # before the generic quantity regex can claim them. Quantities go before
+    # conditions so digit-adjacent condition tokens (e.g., "新" in "新28套")
+    # become parseable once the digit span is gone. ----
+    strict_working = working
+    strict_variant = _extract_bounded_tokens(strict_working, STAMP_VARIANT_TOKENS)
+    for v in strict_variant:
+        strict_working = re.sub(re.escape(v), " ", strict_working, count=1)
+    strict_quantity = _extract_quantity_tokens_strict(strict_working)
+    for q in strict_quantity:
+        strict_working = strict_working.replace(q, " ", 1)
+    strict_condition = _extract_bounded_tokens(strict_working, STAMP_CONDITION_TOKENS)
+    for c in strict_condition:
+        strict_working = re.sub(re.escape(c), " ", strict_working, count=1)
+    strict_name = _clean_issue_name(
+        strict_working,
+        remove_tokens=strict_variant + strict_condition + strict_quantity,
+    )
+
+    strict_field_count = sum(
+        1 for x in (issue_code_norm, strict_name, strict_variant, strict_condition, strict_quantity) if x
+    )
+    use_strict = strict_field_count >= 2 and (issue_code_norm or strict_name)
+
+    if use_strict:
+        variant_tokens = list(strict_variant)
+        condition_tokens = list(strict_condition)
+        quantity_tokens = list(strict_quantity)
+        issue_name = strict_name
+        notes.append("tier=strict")
+    else:
+        variant_tokens = _extract_known_tokens(working, STAMP_VARIANT_TOKENS)
+        condition_tokens = _extract_known_tokens(working, STAMP_CONDITION_TOKENS)
+        quantity_tokens = _extract_quantity_tokens(working)
+        issue_name = _clean_issue_name(
+            working, remove_tokens=variant_tokens + condition_tokens + quantity_tokens
+        )
+        notes.append("tier=loose")
+
     if code_suffix and code_suffix not in variant_tokens:
         variant_tokens.append(code_suffix)
-    condition_tokens = _extract_known_tokens(working, STAMP_CONDITION_TOKENS)
-    quantity_tokens = _extract_quantity_tokens(working)
-    issue_name = _clean_issue_name(working, remove_tokens=variant_tokens + condition_tokens + quantity_tokens)
 
     condition_parts = list(condition_tokens)
     for value in (character_condition, description_character):
@@ -246,17 +341,65 @@ def _parse_coin_title(*, raw_title: str | None, character_condition: str | None,
     if match:
         year_value = int(match.group("year"))
         working = working[match.end() :].strip()
-    asset_type = _find_first_token(title, COIN_ASSET_TOKENS)
-    finish_type = _find_first_token(title, COIN_FINISH_TOKENS)
-    weight_text = _extract_first(title, WEIGHT_RE)
-    denomination_text = _extract_first(title, DENOM_RE)
-    variant_tokens = _extract_known_tokens(title, COIN_VARIANT_TOKENS)
-    quantity_tokens = _extract_quantity_tokens(title)
-    condition_tokens = [x for x in (character_condition, description_character) if x]
-    theme_name = _clean_issue_name(
-        working,
-        remove_tokens=[*variant_tokens, *quantity_tokens, *condition_tokens, *[x for x in [asset_type, finish_type, weight_text, denomination_text] if x]],
+
+    # ---- Strict tier: extract weight/denomination first (precise regexes),
+    # then variants, then quantities, then asset/finish. ----
+    strict_working = working
+    strict_weight = _extract_first(strict_working, WEIGHT_RE)
+    if strict_weight:
+        strict_working = strict_working.replace(strict_weight, " ", 1)
+    strict_denom = _extract_first(strict_working, DENOM_RE)
+    if strict_denom:
+        strict_working = strict_working.replace(strict_denom, " ", 1)
+    strict_variant = _extract_bounded_tokens(strict_working, COIN_VARIANT_TOKENS)
+    for v in strict_variant:
+        strict_working = re.sub(re.escape(v), " ", strict_working, count=1)
+    strict_quantity = _extract_quantity_tokens_strict(strict_working)
+    for q in strict_quantity:
+        strict_working = strict_working.replace(q, " ", 1)
+    strict_asset = _find_first_token(strict_working, COIN_ASSET_TOKENS)
+    strict_finish = _find_first_token(strict_working, COIN_FINISH_TOKENS)
+    strict_theme = _clean_issue_name(
+        strict_working,
+        remove_tokens=[
+            *strict_variant,
+            *[x for x in (strict_asset, strict_finish) if x],
+        ],
     )
+
+    strict_field_count = sum(
+        1 for x in (year_value, strict_theme, strict_asset, strict_finish, strict_weight, strict_denom, strict_variant)
+        if x
+    )
+    use_strict = strict_field_count >= 2 and (year_value is not None or strict_theme or strict_asset)
+
+    if use_strict:
+        asset_type = strict_asset
+        finish_type = strict_finish
+        weight_text = strict_weight
+        denomination_text = strict_denom
+        variant_tokens = list(strict_variant)
+        quantity_tokens = list(strict_quantity)
+        theme_name = strict_theme
+        notes.append("tier=strict")
+    else:
+        asset_type = _find_first_token(title, COIN_ASSET_TOKENS)
+        finish_type = _find_first_token(title, COIN_FINISH_TOKENS)
+        weight_text = _extract_first(title, WEIGHT_RE)
+        denomination_text = _extract_first(title, DENOM_RE)
+        variant_tokens = _extract_known_tokens(title, COIN_VARIANT_TOKENS)
+        quantity_tokens = _extract_quantity_tokens(title)
+        theme_name = _clean_issue_name(
+            working,
+            remove_tokens=[
+                *variant_tokens,
+                *quantity_tokens,
+                *[x for x in (asset_type, finish_type, weight_text, denomination_text) if x],
+            ],
+        )
+        notes.append("tier=loose")
+
+    condition_tokens = [x for x in (character_condition, description_character) if x]
     return {
         "title_normalized": _normalize_spaces(title),
         "identity_core": "|".join(x for x in [str(year_value) if year_value is not None else None, theme_name, asset_type] if x) or None,
@@ -283,9 +426,17 @@ def _parse_coin_title(*, raw_title: str | None, character_condition: str | None,
     }
 
 
-def _parse_other_title(*, raw_title: str | None, character_condition: str | None) -> dict[str, Any]:
+def _parse_other_title(
+    *,
+    raw_title: str | None,
+    character_condition: str | None,
+    tier_note: str | None = None,
+) -> dict[str, Any]:
     title = _normalize_spaces(raw_title or "")
     condition_tokens = [character_condition] if character_condition else []
+    notes: list[str] = []
+    if tier_note:
+        notes.append(f"tier={tier_note}")
     return {
         "title_normalized": title or None,
         "identity_core": title or None,
@@ -308,7 +459,7 @@ def _parse_other_title(*, raw_title: str | None, character_condition: str | None
         "condition_tokens_json": json.dumps(condition_tokens, ensure_ascii=False, separators=(",", ":")),
         "quantity_tokens_json": json.dumps(_extract_quantity_tokens(title), ensure_ascii=False, separators=(",", ":")),
         "parse_confidence": 0.25 if title else 0.0,
-        "parse_notes_json": "[]",
+        "parse_notes_json": json.dumps(notes, ensure_ascii=False, separators=(",", ":")),
     }
 
 
@@ -328,6 +479,30 @@ def _extract_known_tokens(text: str, tokens: tuple[str, ...]) -> list[str]:
     return [token for token in tokens if token in text]
 
 
+def _extract_bounded_tokens(text: str, tokens: tuple[str, ...]) -> list[str]:
+    """Extract tokens with digit-boundary checks, longest-first.
+
+    A token is rejected when adjacent to a digit (so "新" is not extracted
+    from "新28套" until the quantity span has been removed first). Longer
+    tokens are tried before shorter ones so "新全" wins over "新".
+    """
+    sorted_tokens = sorted({t for t in tokens if t}, key=len, reverse=True)
+    results: list[str] = []
+    remaining = text
+    for token in sorted_tokens:
+        pattern = re.compile(rf"(?<!\d){re.escape(token)}(?!\d)")
+        if pattern.search(remaining):
+            results.append(token)
+            remaining = pattern.sub(" ", remaining)
+    # Preserve original token order for callers that expect deterministic ordering.
+    ordered: list[str] = [t for t in tokens if t in results]
+    # Fall back to first-seen order for any tokens not in the source tuple.
+    for t in results:
+        if t not in ordered:
+            ordered.append(t)
+    return ordered
+
+
 def _extract_quantity_tokens(text: str) -> list[str]:
     results: list[str] = []
     for pattern in [r"\d+枚", r"\d+张", r"\d+件", r"\d+套", r"\d+连", r"\d+版", r"一套", r"二枚", r"十枚"]:
@@ -337,12 +512,23 @@ def _extract_quantity_tokens(text: str) -> list[str]:
     return results
 
 
+def _extract_quantity_tokens_strict(text: str) -> list[str]:
+    """Strict quantity extractor: Arabic or Chinese numeral + standard unit char."""
+    results: list[str] = []
+    for match in QUANTITY_RE.findall(text):
+        if match not in results:
+            results.append(match)
+    return results
+
+
 def _clean_issue_name(text: str, *, remove_tokens: list[str]) -> str | None:
     cleaned = text
     for token in sorted({token for token in remove_tokens if token}, key=len, reverse=True):
         cleaned = cleaned.replace(token, " ")
+    # Strip () inner content (typically parenthetical metadata).
     cleaned = re.sub(r"[（(][^）)]*[）)]", " ", cleaned)
-    cleaned = re.sub(r"[【】\\[\\]、,，;；:+\\-_/]+", " ", cleaned)
+    # Strip 【】《》 [] characters but preserve inner content (titles often quote names).
+    cleaned = re.sub(r"[【】\[\]《》、,，;；:+\-_/]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned or None
 

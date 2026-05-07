@@ -32,6 +32,15 @@ from report_ui.layout import (
     render_document,
     show_app_dev_ui,
 )
+from report_ui.formatters import (
+    format_price_cny,
+    format_price_range,
+    format_relationship_badge,
+    format_short_id,
+    format_status_badge,
+    render_listing_link,
+    render_time_html,
+)
 
 from ai_agent_v2.ingestion.live_incremental import DEFAULT_STATE_SOURCE_KEY
 from ai_agent_v2.matching.v2_matcher import run_v2_matching
@@ -1394,47 +1403,81 @@ def load_user_signals_payload(
         if user_row is None:
             raise ValueError(f"user not found: {user_id}")
 
+        # Canonical-row CTE: per (listing_id, signal_type), keep one signal
+        # ranked by urgency then created_at. Signals with listing_id IS NULL
+        # (e.g. discovery_digest) skip ranking and pass through.
         signal_rows = conn.execute(
             """
+            WITH ranked AS (
+              SELECT
+                s.id, s.interest_id, s.target_id, s.listing_id,
+                s.signal_type, s.urgency, s.reason_code,
+                s.signal_title, s.signal_summary, s.group_key, s.payload_json,
+                s.created_at, s.last_seen_at, s.status,
+                i.interest_name, i.interest_kind, i.interest_priority,
+                t.target_label, t.budget_max,
+                n.source_listing_id,
+                n.title AS listing_title,
+                n.status_norm AS listing_status,
+                COALESCE(n.price_end, n.price_initial) AS listing_price,
+                n.price_end,
+                n.updated_at AS listing_updated_at,
+                CASE
+                  WHEN s.listing_id IS NULL THEN 1
+                  ELSE ROW_NUMBER() OVER (
+                    PARTITION BY s.listing_id, s.signal_type
+                    ORDER BY
+                      CASE s.urgency WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+                      s.created_at,
+                      s.id
+                  )
+                END AS rn
+              FROM signals_v2 s
+              JOIN user_interests_v2 i ON i.id = s.interest_id
+              LEFT JOIN user_interest_targets_v2 t ON t.id = s.target_id
+              LEFT JOIN market_listings_norm_v2 n ON n.id = s.listing_id
+              WHERE s.user_id = ? AND s.status = 'active'
+            )
             SELECT
-              s.id,
-              s.interest_id,
-              s.target_id,
-              s.listing_id,
-              s.signal_type,
-              s.urgency,
-              s.reason_code,
-              s.signal_title,
-              s.signal_summary,
-              s.group_key,
-              s.payload_json,
-              s.created_at,
-              s.last_seen_at,
-              s.status,
-              i.interest_name,
-              i.interest_kind,
-              i.interest_priority,
-              t.target_label,
-              t.budget_max,
-              n.source_listing_id,
-              n.title AS listing_title,
-              n.status_norm AS listing_status,
-              COALESCE(n.price_end, n.price_initial) AS listing_price,
-              n.price_end,
-              n.updated_at AS listing_updated_at
-            FROM signals_v2 s
-            JOIN user_interests_v2 i ON i.id = s.interest_id
-            LEFT JOIN user_interest_targets_v2 t ON t.id = s.target_id
-            LEFT JOIN market_listings_norm_v2 n ON n.id = s.listing_id
-            WHERE s.user_id = ? AND s.status = 'active'
+              id, interest_id, target_id, listing_id, signal_type, urgency, reason_code,
+              signal_title, signal_summary, group_key, payload_json, created_at, last_seen_at, status,
+              interest_name, interest_kind, interest_priority,
+              target_label, budget_max,
+              source_listing_id, listing_title, listing_status, listing_price, price_end, listing_updated_at
+            FROM ranked
+            WHERE rn = 1
             ORDER BY
-              CASE s.urgency WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
-              s.last_seen_at DESC,
-              i.interest_name,
-              s.signal_type
+              CASE urgency WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+              last_seen_at DESC,
+              interest_name,
+              signal_type
             """,
             (user_id,),
         ).fetchall()
+
+        # Companion query: count duplicates and collect contributing interests
+        # for each (listing_id, signal_type) where consolidation happened.
+        dup_rows = conn.execute(
+            """
+            SELECT s.listing_id, s.signal_type,
+                   COUNT(*) AS dup_count,
+                   GROUP_CONCAT(i.interest_name, '||') AS interest_names
+            FROM signals_v2 s
+            JOIN user_interests_v2 i ON i.id = s.interest_id
+            WHERE s.user_id = ? AND s.status = 'active' AND s.listing_id IS NOT NULL
+            GROUP BY s.listing_id, s.signal_type
+            HAVING COUNT(*) > 1
+            """,
+            (user_id,),
+        ).fetchall()
+        dup_map: dict[tuple[str, str], dict[str, object]] = {}
+        for r in dup_rows:
+            names_raw = str(r["interest_names"] or "")
+            names = [n for n in names_raw.split("||") if n]
+            dup_map[(str(r["listing_id"]), str(r["signal_type"]))] = {
+                "count": int(r["dup_count"]),
+                "interest_names": names,
+            }
 
     recent_cutoff = datetime.utcnow().timestamp() - (lookback_hours * 3600)
     signals: list[dict[str, object]] = []
@@ -1468,6 +1511,17 @@ def load_user_signals_payload(
             "price": listing_price,
             "updated_at": signal.get("listing_updated_at"),
         }
+        listing_id = signal.get("listing_id")
+        if listing_id is not None:
+            dup_info = dup_map.get((str(listing_id), signal_type))
+            if dup_info:
+                canonical_name = signal.get("interest_name")
+                others = [n for n in dup_info["interest_names"] if n != canonical_name]
+                if others:
+                    signal["consolidation"] = {
+                        "duplicate_count": dup_info["count"],
+                        "contributing_interests": others,
+                    }
         signals.append(signal)
 
         interest_key = str(signal.get("interest_id"))
@@ -3305,6 +3359,18 @@ def render_signal_card(
         note_bits.append(f'<p class="signal-note">{html.escape(str(context_note))}</p>')
     if pricing_note:
         note_bits.append(f'<p class="signal-note">{html.escape(str(pricing_note))}</p>')
+    consolidation = signal.get("consolidation")
+    if isinstance(consolidation, dict):
+        others = consolidation.get("contributing_interests")
+        if isinstance(others, list) and others:
+            shown = others[:3]
+            extra = len(others) - len(shown)
+            label = ", ".join(f'"{html.escape(str(name))}"' for name in shown)
+            if extra > 0:
+                label += f" and {extra} more"
+            note_bits.append(
+                f'<p class="signal-consolidation-note">Also wanted by {label}</p>'
+            )
     links: list[str] = []
     if latest_review_link:
         links.append(f'<a href="{html.escape(str(latest_review_link))}">Latest alert roundup</a>')
@@ -3813,6 +3879,314 @@ def render_digest_markdown_html(text: str) -> str:
     return "\n".join(sections) if sections else "<p>No digest body.</p>"
 
 
+_DIGEST_ROW_GROUPS = {
+    "Recent activity in lookback window": "recent_activity",
+    "Recent activity": "recent_activity",
+    "Representative recent listings": "representative",
+    "Top active opportunity groups": "top_groups",
+    "Recent ended comparable listings": "ended_comps",
+}
+
+_PRICE_TEXT_RE = re.compile(r"start\s+([\d.\-]+)(?:\s*(?:->|→)\s*end\s+([\d.\-]+))?", re.IGNORECASE)
+_END_PRICE_RE = re.compile(r"ended\s+([\d.\-]+)", re.IGNORECASE)
+_COUNT_RE = re.compile(r"^([\d.\-]+)\s+(refreshed listings|listings)$", re.IGNORECASE)
+_TOP_SCORE_RE = re.compile(r"top\s+score\s+([\d.\-]+)", re.IGNORECASE)
+_START_RANGE_RE = re.compile(r"start\s+([\d.\-]+(?:[\-–][\d.\-]+)?)", re.IGNORECASE)
+_CONDITION_PREFIX_RE = re.compile(r"^condition\s+(.+)$", re.IGNORECASE)
+_PARSE_MARKER_RE = re.compile(r"<!--p:(\{.*?\})-->\s*$")
+
+
+def _strip_backticks(value: str) -> str:
+    return value.replace("`", "").strip()
+
+
+def _split_pipe_cells(text: str) -> list[str]:
+    return [_strip_backticks(cell) for cell in str(text).split("|")]
+
+
+def _extract_parse_marker(text: str) -> tuple[str, dict | None]:
+    """Strip and decode the trailing <!--p:{...}--> marker if present."""
+    if not text or "<!--p:" not in text:
+        return text, None
+    m = _PARSE_MARKER_RE.search(text)
+    if not m:
+        return text, None
+    try:
+        decoded = json.loads(m.group(1))
+    except (json.JSONDecodeError, ValueError):
+        return text, None
+    cleaned = text[: m.start()].rstrip()
+    return cleaned, decoded if isinstance(decoded, dict) else None
+
+
+def _format_listing_facets(parsed: dict | None) -> tuple[str, str]:
+    """Return (headline_html, facet_chips_html) from a parsed-fields dict.
+
+    Empty inputs yield ('', ''); the caller falls back to raw title.
+    """
+    if not parsed:
+        return "", ""
+    family = parsed.get("f")
+    headline_parts: list[str] = []
+    chips: list[tuple[str, object]] = []
+    if family == "stamp_like":
+        if parsed.get("c"):
+            headline_parts.append(str(parsed["c"]))
+        if parsed.get("n"):
+            headline_parts.append(str(parsed["n"]))
+    elif family == "coin_like":
+        if parsed.get("y"):
+            headline_parts.append(f"{parsed['y']}年")
+        if parsed.get("t"):
+            headline_parts.append(str(parsed["t"]))
+        if parsed.get("a"):
+            headline_parts.append(str(parsed["a"]))
+        if parsed.get("fi"):
+            chips.append(("finish", parsed["fi"]))
+        if parsed.get("w"):
+            chips.append(("weight", parsed["w"]))
+        if parsed.get("d"):
+            chips.append(("denom", parsed["d"]))
+    for token in parsed.get("v") or []:
+        chips.append(("variant", token))
+    for token in parsed.get("cd") or []:
+        chips.append(("cond", token))
+    for token in parsed.get("q") or []:
+        chips.append(("qty", token))
+    headline_html = " · ".join(html.escape(part) for part in headline_parts if part)
+    chip_html = "".join(
+        f'<span class="digest-facet digest-facet--{html.escape(kind)}">{html.escape(str(value))}</span>'
+        for kind, value in chips
+        if value
+    )
+    return headline_html, chip_html
+
+
+def _parse_digest_row(group_name: str, text: str) -> dict | None:
+    """Parse a pipe-separated row into a structured record.
+
+    Returns None when the row's cell count or shape doesn't match the group's
+    expected schema; callers should fall back to raw markdown rendering.
+    """
+    kind = _DIGEST_ROW_GROUPS.get(group_name)
+    if kind is None:
+        return None
+    cleaned_text, parsed_fields = _extract_parse_marker(text)
+    cells = _split_pipe_cells(cleaned_text)
+    if not cells or all(not c for c in cells):
+        return None
+
+    if kind == "recent_activity":
+        if len(cells) < 4:
+            return None
+        relationship = cells[0]
+        status = cells[1]
+        title = cells[2]
+        count_match = _COUNT_RE.match(cells[3])
+        count = count_match.group(1) if count_match else cells[3]
+        start_range = ""
+        if len(cells) >= 5:
+            m = _START_RANGE_RE.search(cells[4])
+            if m:
+                start_range = m.group(1)
+        return {
+            "kind": kind,
+            "relationship": relationship,
+            "status": status,
+            "title": title,
+            "count": count,
+            "start_range": start_range,
+            "parsed_fields": parsed_fields,
+        }
+
+    if kind == "representative":
+        if len(cells) < 5:
+            return None
+        source_id = cells[0]
+        relationship = cells[1]
+        status = cells[2]
+        title = cells[3]
+        price_initial = ""
+        price_end = ""
+        m = _PRICE_TEXT_RE.search(cells[4])
+        if m:
+            price_initial = m.group(1)
+            price_end = m.group(2) or ""
+        condition = ""
+        if len(cells) >= 6:
+            cm = _CONDITION_PREFIX_RE.match(cells[5])
+            condition = cm.group(1) if cm else cells[5]
+        return {
+            "kind": kind,
+            "source_id": source_id,
+            "relationship": relationship,
+            "status": status,
+            "title": title,
+            "price_initial": price_initial,
+            "price_end": price_end,
+            "condition": condition,
+            "parsed_fields": parsed_fields,
+        }
+
+    if kind == "top_groups":
+        if len(cells) < 5:
+            return None
+        relationship = cells[0]
+        status = cells[1]
+        title = cells[2]
+        count_match = _COUNT_RE.match(cells[3])
+        count = count_match.group(1) if count_match else cells[3]
+        top_score = ""
+        ts = _TOP_SCORE_RE.search(cells[4])
+        if ts:
+            top_score = ts.group(1)
+        start_range = ""
+        if len(cells) >= 6:
+            m = _START_RANGE_RE.search(cells[5])
+            if m:
+                start_range = m.group(1)
+        return {
+            "kind": kind,
+            "relationship": relationship,
+            "status": status,
+            "title": title,
+            "count": count,
+            "top_score": top_score,
+            "start_range": start_range,
+            "parsed_fields": parsed_fields,
+        }
+
+    if kind == "ended_comps":
+        if len(cells) < 5:
+            return None
+        source_id = cells[0]
+        title = cells[1]
+        end_price = ""
+        m = _END_PRICE_RE.search(cells[2])
+        if m:
+            end_price = m.group(1)
+        condition = cells[3] if cells[3] not in {"-", ""} else ""
+        end_at = cells[4] if cells[4] not in {"-", ""} else ""
+        return {
+            "kind": kind,
+            "source_id": source_id,
+            "title": title,
+            "end_price": end_price,
+            "condition": condition,
+            "end_at": end_at,
+            "parsed_fields": parsed_fields,
+        }
+
+    return None
+
+
+def _render_digest_mini_card(row: dict) -> str:
+    kind = row.get("kind")
+    relationship = str(row.get("relationship") or "")
+    status = str(row.get("status") or "")
+    title = str(row.get("title") or "").strip() or "(untitled)"
+    source_id = str(row.get("source_id") or "").strip()
+    condition = str(row.get("condition") or "").strip()
+
+    badges = []
+    if relationship:
+        badges.append(format_relationship_badge(relationship))
+    if status:
+        badges.append(format_status_badge(status))
+    badge_row = (
+        f'<div class="badge-row">{"".join(badges)}</div>' if badges else ""
+    )
+
+    def _format_start_label(start_range: str) -> str:
+        s = start_range.strip()
+        if not s:
+            return ""
+        if "–" in s or ("-" in s[1:] and not s.startswith("-")):
+            sep = "–" if "–" in s else "-"
+            a, _, b = s.partition(sep)
+            return f"starts {format_price_range(a, b)}"
+        return f"starts {format_price_cny(s)}"
+
+    meta_bits: list[str] = []
+    if kind == "recent_activity":
+        count = str(row.get("count") or "").strip()
+        if count:
+            label = "listing" if count in {"1", "1.0"} else "listings"
+            meta_bits.append(f'<span>{html.escape(count)} {label}</span>')
+        start_label = _format_start_label(str(row.get("start_range") or ""))
+        if start_label:
+            meta_bits.append(f'<span class="price">{html.escape(start_label)}</span>')
+    elif kind == "top_groups":
+        count = str(row.get("count") or "").strip()
+        if count:
+            label = "listing" if count in {"1", "1.0"} else "listings"
+            meta_bits.append(f'<span>{html.escape(count)} {label}</span>')
+        top_score = str(row.get("top_score") or "").strip()
+        if top_score:
+            meta_bits.append(f'<span>top score {html.escape(top_score)}</span>')
+        start_label = _format_start_label(str(row.get("start_range") or ""))
+        if start_label:
+            meta_bits.append(f'<span class="price">{html.escape(start_label)}</span>')
+    elif kind == "representative":
+        price_initial = row.get("price_initial") or ""
+        price_end = row.get("price_end") or ""
+        if price_end:
+            price_label = f"{format_price_cny(price_initial)} → {format_price_cny(price_end)}"
+        elif price_initial:
+            price_label = f"starts {format_price_cny(price_initial)}"
+        else:
+            price_label = ""
+        if price_label:
+            meta_bits.append(f'<span class="price">{html.escape(price_label)}</span>')
+        if condition:
+            meta_bits.append(f'<span class="condition">{html.escape(condition)}</span>')
+    elif kind == "ended_comps":
+        end_price = row.get("end_price") or ""
+        if end_price:
+            meta_bits.append(f'<span class="price">ended {html.escape(format_price_cny(end_price))}</span>')
+        end_at = row.get("end_at") or ""
+        if end_at:
+            meta_bits.append(render_time_html(end_at))
+        if condition:
+            meta_bits.append(f'<span class="condition">{html.escape(condition)}</span>')
+
+    meta_row = (
+        f'<div class="meta-row">{"".join(meta_bits)}</div>' if meta_bits else ""
+    )
+
+    source_id_html = ""
+    if source_id and kind in {"representative", "ended_comps"}:
+        source_id_html = f'<span class="source-id">{html.escape(format_short_id(source_id))}</span>'
+
+    link_html = ""
+    if source_id and kind in {"representative", "ended_comps"}:
+        link_html = render_listing_link(source_listing_id=source_id)
+
+    parsed_fields = row.get("parsed_fields") if isinstance(row, dict) else None
+    headline_html, facet_html = _format_listing_facets(parsed_fields if isinstance(parsed_fields, dict) else None)
+
+    if headline_html:
+        headline_block = f'<div class="digest-mini-headline">{headline_html}</div>'
+        subtitle_block = f'<div class="digest-mini-subtitle" title="{html.escape(title)}">{render_inline_markdown(title)}</div>'
+        facet_block = f'<div class="digest-facet-row">{facet_html}</div>' if facet_html else ""
+    else:
+        headline_block = f'<h4 class="digest-mini-title">{render_inline_markdown(title)}</h4>'
+        subtitle_block = ""
+        facet_block = ""
+
+    return (
+        '<article class="digest-mini-card">'
+        f'{badge_row}'
+        f'{headline_block}'
+        f'{subtitle_block}'
+        f'{facet_block}'
+        f'{meta_row}'
+        f'{source_id_html}'
+        f'{link_html}'
+        '</article>'
+    )
+
+
 def render_digest_structured_html(text: str) -> str:
     """Digest-specific rendering with cards and grouped details."""
     prepared = humanize_digest_markdown(text, omit_leading_digest_title=True)
@@ -3923,9 +4297,24 @@ def render_digest_structured_html(text: str) -> str:
         for name, items in groups.items():
             if not isinstance(items, list) or not items:
                 continue
-            lis = "".join(f"<li>{render_inline_markdown(str(it))}</li>" for it in items[:8])
+            mini_cards: list[str] = []
+            fallback_lis: list[str] = []
+            for it in items[:8]:
+                row = _parse_digest_row(str(name), str(it))
+                if row is not None:
+                    mini_cards.append(_render_digest_mini_card(row))
+                else:
+                    fallback_lis.append(f"<li>{render_inline_markdown(str(it))}</li>")
+            body_parts: list[str] = []
+            if mini_cards:
+                body_parts.append(
+                    f'<div class="digest-mini-card-grid">{"".join(mini_cards)}</div>'
+                )
+            if fallback_lis:
+                body_parts.append(f'<ul>{"".join(fallback_lis)}</ul>')
+            body_html = "".join(body_parts) or f"<ul>{''.join(f'<li>{render_inline_markdown(str(it))}</li>' for it in items[:8])}</ul>"
             grouped_html_parts.append(
-                f'<details class="digest-detail-group"><summary>{html.escape(str(name))}</summary><ul>{lis}</ul></details>'
+                f'<details class="digest-detail-group"><summary>{html.escape(str(name))}</summary>{body_html}</details>'
             )
         grouped_html = "".join(grouped_html_parts) or '<p class="digest-muted">No extra detail blocks.</p>'
         summary_html = (

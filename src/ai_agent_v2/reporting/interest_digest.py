@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -161,9 +162,22 @@ def _build_interest_digest_section(conn: sqlite3.Connection, row: sqlite3.Row, *
                   MIN(n.price_initial) AS min_start_price,
                   MAX(n.price_initial) AS max_start_price,
                   MAX(lm.match_score) AS top_match_score,
-                  MAX(n.updated_at) AS latest_listing_update
+                  MAX(n.updated_at) AS latest_listing_update,
+                  MIN(p.parse_family) AS parse_family,
+                  MIN(p.issue_code_norm) AS issue_code_norm,
+                  MIN(p.issue_name) AS issue_name,
+                  MIN(p.year_value) AS year_value,
+                  MIN(p.theme_name) AS theme_name,
+                  MIN(p.asset_type) AS asset_type,
+                  MIN(p.finish_type) AS finish_type,
+                  MIN(p.weight_text) AS weight_text,
+                  MIN(p.denomination_text) AS denomination_text,
+                  MIN(p.variant_tokens_json) AS variant_tokens_json,
+                  MIN(p.condition_tokens_json) AS condition_tokens_json,
+                  MIN(p.quantity_tokens_json) AS quantity_tokens_json
                 FROM listing_matches_v2 lm
                 JOIN market_listings_norm_v2 n ON n.id = lm.listing_id
+                LEFT JOIN listing_parse_v2 p ON p.listing_id = n.id
                 WHERE lm.status = 'active' AND lm.user_item_id = ?
                 GROUP BY n.title, n.status_norm, lm.relationship_type
                 ORDER BY
@@ -192,9 +206,22 @@ def _build_interest_digest_section(conn: sqlite3.Connection, row: sqlite3.Row, *
                   COUNT(*) AS listing_count,
                   MIN(n.price_initial) AS min_start_price,
                   MAX(n.price_initial) AS max_start_price,
-                  MAX(n.updated_at) AS latest_listing_update
+                  MAX(n.updated_at) AS latest_listing_update,
+                  MIN(p.parse_family) AS parse_family,
+                  MIN(p.issue_code_norm) AS issue_code_norm,
+                  MIN(p.issue_name) AS issue_name,
+                  MIN(p.year_value) AS year_value,
+                  MIN(p.theme_name) AS theme_name,
+                  MIN(p.asset_type) AS asset_type,
+                  MIN(p.finish_type) AS finish_type,
+                  MIN(p.weight_text) AS weight_text,
+                  MIN(p.denomination_text) AS denomination_text,
+                  MIN(p.variant_tokens_json) AS variant_tokens_json,
+                  MIN(p.condition_tokens_json) AS condition_tokens_json,
+                  MIN(p.quantity_tokens_json) AS quantity_tokens_json
                 FROM listing_matches_v2 lm
                 JOIN market_listings_norm_v2 n ON n.id = lm.listing_id
+                LEFT JOIN listing_parse_v2 p ON p.listing_id = n.id
                 WHERE lm.status = 'active'
                   AND lm.user_item_id = ?
                   AND n.updated_at >= ?
@@ -227,9 +254,22 @@ def _build_interest_digest_section(conn: sqlite3.Connection, row: sqlite3.Row, *
                   n.character_name_raw,
                   n.updated_at,
                   lm.relationship_type,
-                  lm.match_score
+                  lm.match_score,
+                  p.parse_family,
+                  p.issue_code_norm,
+                  p.issue_name,
+                  p.year_value,
+                  p.theme_name,
+                  p.asset_type,
+                  p.finish_type,
+                  p.weight_text,
+                  p.denomination_text,
+                  p.variant_tokens_json,
+                  p.condition_tokens_json,
+                  p.quantity_tokens_json
                 FROM listing_matches_v2 lm
                 JOIN market_listings_norm_v2 n ON n.id = lm.listing_id
+                LEFT JOIN listing_parse_v2 p ON p.listing_id = n.id
                 WHERE lm.status = 'active'
                   AND lm.user_item_id = ?
                   AND n.updated_at >= ?
@@ -366,6 +406,52 @@ def _summarize_interest(
     return f"`{target}` has `{recent_listing_count}` recently refreshed listings across `{sum(relationship_counts.values())}` active matches."
 
 
+def _parse_fields_marker(record: dict[str, Any] | None) -> str:
+    """Encode parsed fields from a row dict into a hidden HTML comment.
+
+    Consumed by the dashboard's mini-card renderer. Returns '' when no
+    structural anchors were extracted (parse_family='other' or all-null).
+    """
+    if not record:
+        return ""
+    family = _text(record.get("parse_family"))
+    if not family or family == "other":
+        return ""
+    payload: dict[str, Any] = {"f": family}
+    for src_key, dst_key in (
+        ("issue_code_norm", "c"),
+        ("issue_name", "n"),
+        ("year_value", "y"),
+        ("theme_name", "t"),
+        ("asset_type", "a"),
+        ("finish_type", "fi"),
+        ("weight_text", "w"),
+        ("denomination_text", "d"),
+    ):
+        value = record.get(src_key)
+        if value not in (None, "", 0, "0"):
+            payload[dst_key] = value
+    for src_key, dst_key in (
+        ("variant_tokens_json", "v"),
+        ("condition_tokens_json", "cd"),
+        ("quantity_tokens_json", "q"),
+    ):
+        raw = record.get(src_key)
+        if not raw:
+            continue
+        try:
+            tokens = json.loads(raw) if isinstance(raw, str) else list(raw)
+        except (json.JSONDecodeError, TypeError):
+            tokens = []
+        if tokens:
+            payload[dst_key] = tokens
+    if len(payload) <= 1:
+        return ""
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    # Hyphens inside the comment are safe; we never emit '--' in our JSON.
+    return f" <!--p:{encoded}-->"
+
+
 def _render_report(
     *,
     user: dict[str, Any],
@@ -444,6 +530,7 @@ def _render_report(
                 lines.append(
                     f"- `{group['relationship_type']}` | `{group['status_norm']}` | `{group['title']}` | "
                     f"`{group['listing_count']}` refreshed listings{suffix}"
+                    f"{_parse_fields_marker(group)}"
                 )
         else:
             lines.append("- none")
@@ -457,6 +544,7 @@ def _render_report(
                 lines.append(
                     f"- `{match['source_listing_id']}` | `{match['relationship_type']}` | `{match['status_norm']}` | "
                     f"`{match['title']}` | {_price_text(match['price_initial'], match['price_end'])}{condition_text}"
+                    f"{_parse_fields_marker(match)}"
                 )
         else:
             lines.append("- none")
@@ -470,6 +558,7 @@ def _render_report(
                 lines.append(
                     f"- `{group['relationship_type']}` | `{group['status_norm']}` | `{group['title']}` | "
                     f"`{group['listing_count']}` listings | top score `{group['top_match_score']}`{suffix}"
+                    f"{_parse_fields_marker(group)}"
                 )
         else:
             lines.append("- none")
@@ -482,6 +571,7 @@ def _render_report(
                 lines.append(
                     f"- `{comp['source_listing_id']}` | `{comp['title']}` | ended `{comp['price_end']}` | "
                     f"`{comp['character_name_raw'] or '-'}` | `{comp['end_at'] or '-'} `"
+                    f"{_parse_fields_marker(comp)}"
                 )
         else:
             lines.append("- none found in current normalized catalog")
