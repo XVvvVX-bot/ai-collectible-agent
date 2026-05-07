@@ -33,6 +33,7 @@ from report_ui.layout import (
     show_app_dev_ui,
 )
 from report_ui.formatters import (
+    build_listing_url,
     format_price_cny,
     format_price_range,
     format_relationship_badge,
@@ -3343,17 +3344,23 @@ def render_signal_card(
     urgency = str(signal.get("urgency") or "low")
     family = str(signal.get("signal_family") or "standing")
     interest_name = str(signal.get("interest_name") or "-")
+    interest_id = signal.get("interest_id")
     context_note = signal.get("context_note")
     pricing_note = signal.get("pricing_note")
     listing = signal.get("listing")
-    latest_review_link = None
-    if isinstance(signal_review_metadata, dict):
-        links = signal_review_metadata.get("links")
-        if isinstance(links, dict):
-            latest_review_link = links.get("rendered")
+    listing_url = None
     listing_html = ""
     if isinstance(listing, dict) and listing.get("source_listing_id"):
-        listing_html = f'<span class="pill">Listing {html.escape(str(listing.get("source_listing_id")))}</span>'
+        source_id = str(listing.get("source_listing_id"))
+        listing_url = build_listing_url(source_listing_id=source_id)
+        if listing_url:
+            listing_html = (
+                f'<a class="pill" href="{html.escape(listing_url)}" '
+                f'target="_blank" rel="noopener noreferrer">'
+                f'Listing {html.escape(source_id)} ↗</a>'
+            )
+        else:
+            listing_html = f'<span class="pill">Listing {html.escape(source_id)}</span>'
     note_bits = []
     if context_note:
         note_bits.append(f'<p class="signal-note">{html.escape(str(context_note))}</p>')
@@ -3372,8 +3379,15 @@ def render_signal_card(
                 f'<p class="signal-consolidation-note">Also wanted by {label}</p>'
             )
     links: list[str] = []
-    if latest_review_link:
-        links.append(f'<a href="{html.escape(str(latest_review_link))}">Latest alert roundup</a>')
+    if listing_url:
+        links.append(
+            f'<a href="{html.escape(listing_url)}" target="_blank" rel="noopener noreferrer">View listing ↗</a>'
+        )
+    if interest_id:
+        manage_url = (
+            f"/interests/edit?user_id={quote(user_id)}&interest_id={quote(str(interest_id))}"
+        )
+        links.append(f'<a href="{html.escape(manage_url)}">Manage interest</a>')
     if show_app_dev_ui():
         links.append(f'<a href="/api/users/{quote(user_id)}/signals">Alerts (JSON)</a>')
     links_html = " · ".join(links) if links else ""
