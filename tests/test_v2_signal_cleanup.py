@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ai_agent_v2.signals.cleanup import prune_inactive_signals
@@ -12,8 +13,8 @@ def test_prune_inactive_signals_deletes_only_old_inactive_rows(tmp_path: Path):
     db_path = tmp_path / "agent_v2.db"
     SqliteV2Store(str(db_path)).ensure_schema()
 
-    old_time = "2026-01-01T00:00:00+00:00"
-    new_time = "2026-03-29T00:00:00+00:00"
+    old_time = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+    new_time = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
 
     with sqlite3.connect(db_path) as conn:
         conn.execute(
