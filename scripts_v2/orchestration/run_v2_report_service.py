@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -49,6 +50,7 @@ REPORT_PATTERNS = (
 )
 DEFAULT_DASHBOARD_USER_ID = os.getenv("APP_DEFAULT_USER_ID") or "demo_u_v2_curated"
 DEFAULT_INTEREST_REFRESH_LOOKBACK_HOURS = int(os.getenv("APP_DAILY_LOOKBACK_HOURS", "24"))
+SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("APP_SQLITE_BUSY_TIMEOUT_MS", "30000"))
 
 
 def main() -> int:
@@ -695,6 +697,32 @@ def utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "+00:00")
 
 
+def db_connect(db_path: Path, *, write: bool = False) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+    conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    if write:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
+def run_with_sqlite_retry(callable_fn, *, attempts: int = 4, base_delay_s: float = 0.25):
+    last_exc: Exception | None = None
+    for idx in range(attempts):
+        try:
+            return callable_fn()
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if "database is locked" not in msg and "database is busy" not in msg:
+                raise
+            last_exc = exc
+            if idx >= attempts - 1:
+                break
+            time.sleep(base_delay_s * (idx + 1))
+    raise ValueError("Database is busy right now. Please retry in a moment.") from last_exc
+
+
 def resolve_intent_confidence(interest_kind: str) -> float:
     return {
         "watch_buy": 0.9,
@@ -837,8 +865,7 @@ def build_manual_interest_target(
 
 
 def load_user_profile_payload(db_path: Path, *, user_id: str) -> dict[str, object]:
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with db_connect(db_path) as conn:
         user_row = conn.execute(
             """
             SELECT id, display_name, language, timezone, created_at, updated_at
@@ -982,8 +1009,7 @@ def load_user_interests_payload(db_path: Path, *, user_id: str) -> dict[str, obj
     profile_payload = load_user_profile_payload(db_path, user_id=user_id)
     interests = profile_payload["interests"] if isinstance(profile_payload.get("interests"), list) else []
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with db_connect(db_path) as conn:
         signal_count_rows = conn.execute(
             """
             SELECT interest_id, COUNT(*) AS signal_count
@@ -1137,28 +1163,32 @@ def create_interest_form(
     min_match_score: float | None,
     max_signals_per_day: int,
 ) -> dict[str, object]:
-    created_record = create_interest_record(
-        db_path=db_path,
-        user_id=user_id,
-        interest_name=interest_name,
-        raw_input=raw_input,
-        interest_kind=interest_kind,
-        scope_kind=scope_kind,
-        precision_mode=precision_mode,
-        interest_priority=interest_priority,
-        interest_notes=interest_notes,
-        budget_max=budget_max,
-        condition_mode=condition_mode,
-        delivery_mode=delivery_mode,
-        cooldown_hours=cooldown_hours,
-        min_match_score=min_match_score,
-        max_signals_per_day=max_signals_per_day,
+    created_record = run_with_sqlite_retry(
+        lambda: create_interest_record(
+            db_path=db_path,
+            user_id=user_id,
+            interest_name=interest_name,
+            raw_input=raw_input,
+            interest_kind=interest_kind,
+            scope_kind=scope_kind,
+            precision_mode=precision_mode,
+            interest_priority=interest_priority,
+            interest_notes=interest_notes,
+            budget_max=budget_max,
+            condition_mode=condition_mode,
+            delivery_mode=delivery_mode,
+            cooldown_hours=cooldown_hours,
+            min_match_score=min_match_score,
+            max_signals_per_day=max_signals_per_day,
+        ),
     )
     interest_id = str(created_record["interest_id"])
-    refresh_payload = run_interest_refresh_payload(
-        db_path,
-        user_id=user_id,
-        lookback_hours=DEFAULT_INTEREST_REFRESH_LOOKBACK_HOURS,
+    refresh_payload = run_with_sqlite_retry(
+        lambda: run_interest_refresh_payload(
+            db_path,
+            user_id=user_id,
+            lookback_hours=DEFAULT_INTEREST_REFRESH_LOOKBACK_HOURS,
+        ),
     )
     created = load_interest_editor_payload(db_path, user_id=user_id, interest_id=interest_id)
     return {
@@ -1196,8 +1226,7 @@ def save_interest_form(
         raise ValueError("invalid delivery_mode")
 
     now_iso = datetime.utcnow().replace(microsecond=0).isoformat() + "+00:00"
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with db_connect(db_path, write=True) as conn:
         interest_row = conn.execute(
             """
             SELECT id
@@ -1297,15 +1326,19 @@ def delete_interest_form(
     user_id: str,
     interest_id: str,
 ) -> dict[str, object]:
-    deleted_record = delete_interest_record(
-        db_path=db_path,
-        user_id=user_id,
-        interest_id=interest_id,
+    deleted_record = run_with_sqlite_retry(
+        lambda: delete_interest_record(
+            db_path=db_path,
+            user_id=user_id,
+            interest_id=interest_id,
+        ),
     )
-    refresh_payload = run_interest_refresh_payload(
-        db_path,
-        user_id=user_id,
-        lookback_hours=DEFAULT_INTEREST_REFRESH_LOOKBACK_HOURS,
+    refresh_payload = run_with_sqlite_retry(
+        lambda: run_interest_refresh_payload(
+            db_path,
+            user_id=user_id,
+            lookback_hours=DEFAULT_INTEREST_REFRESH_LOOKBACK_HOURS,
+        ),
     )
     refreshed = load_user_interests_payload(db_path, user_id=user_id)
     return {
@@ -1349,8 +1382,7 @@ def load_user_signals_payload(
     user_id: str,
     lookback_hours: int,
 ) -> dict[str, object]:
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with db_connect(db_path) as conn:
         user_row = conn.execute(
             """
             SELECT id, display_name, language, timezone
@@ -1494,8 +1526,7 @@ def load_user_matches_payload(
     *,
     user_id: str,
 ) -> dict[str, object]:
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with db_connect(db_path) as conn:
         user_row = conn.execute(
             """
             SELECT id, display_name, language, timezone
@@ -2742,6 +2773,7 @@ def render_dashboard_html(
     user = profile_payload["user"]
     summary = profile_payload["summary"]
     latest_cards_html = render_latest_dashboard_cards(reports_payload)
+    reports_browser_html = render_reports_browser(reports_payload, user_id=user_id)
     signals_inbox_html = render_signals_inbox(
         signals_payload,
         user_id=user_id,
@@ -2893,8 +2925,65 @@ def render_dashboard_html(
         </div>
       </div>
       <div class="grid">{latest_cards_html}</div>
+      <div class="reports-browser-wrap">
+        <h3>All recent reports</h3>
+        <p class="signal-note">Sort or filter to quickly find the report you need.</p>
+        {reports_browser_html}
+      </div>
     </section>
     """
+
+    dashboard_extra_css = """
+    .reports-browser-wrap { margin-top: 18px; display: grid; gap: 10px; }
+    .reports-browser-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .reports-browser-toolbar label { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 0.92rem; }
+    .reports-browser-toolbar select,
+    .reports-browser-toolbar input {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: #fffdf8;
+      font: inherit;
+      min-width: 160px;
+    }
+    .report-browser-item { transition: opacity .12s ease, transform .12s ease; }
+    .report-browser-links { font-size: 0.92rem; color: var(--muted); }
+    """
+    dashboard_suffix_script = """
+<script>
+(() => {
+  const list = document.getElementById("reports-browser-list");
+  const sortSel = document.getElementById("reports-sort");
+  const filter = document.getElementById("reports-filter");
+  if (!list || !sortSel || !filter) return;
+  const items = Array.from(list.querySelectorAll(".report-browser-item"));
+  const parseTs = (el) => Date.parse(el.getAttribute("data-ts") || "") || 0;
+  const keyText = (el) => [
+    el.getAttribute("data-label") || "",
+    el.getAttribute("data-scope") || "",
+    el.getAttribute("data-kind") || "",
+    el.textContent || "",
+  ].join(" ").toLowerCase();
+  const render = () => {
+    const q = filter.value.trim().toLowerCase();
+    const mode = sortSel.value;
+    const shown = items.filter((el) => keyText(el).includes(q));
+    for (const el of items) {
+      el.style.display = shown.includes(el) ? "" : "none";
+    }
+    const sorted = [...shown].sort((a, b) => {
+      if (mode === "oldest") return parseTs(a) - parseTs(b);
+      if (mode === "label") return (a.getAttribute("data-label") || "").localeCompare(b.getAttribute("data-label") || "");
+      return parseTs(b) - parseTs(a);
+    });
+    for (const el of sorted) list.appendChild(el);
+  };
+  sortSel.addEventListener("change", render);
+  filter.addEventListener("input", render);
+  render();
+})();
+</script>
+"""
 
     return render_document(
         title="Collector home",
@@ -2902,6 +2991,8 @@ def render_dashboard_html(
         user_id=user_id,
         nav_active="dashboard",
         main_inner_html=main_inner.strip(),
+        extra_css=dashboard_extra_css.strip(),
+        body_suffix_html=dashboard_suffix_script.strip(),
     )
 
 
@@ -2928,6 +3019,65 @@ def render_latest_dashboard_cards(reports_payload: dict[str, object]) -> str:
             """
         )
     return "\n".join(cards) or '<p class="empty-state">No report shortcuts available yet.</p>'
+
+
+def render_reports_browser(reports_payload: dict[str, object], *, user_id: str) -> str:
+    reports = reports_payload.get("reports") if isinstance(reports_payload.get("reports"), list) else []
+    shared_reports = reports_payload.get("shared_reports") if isinstance(reports_payload.get("shared_reports"), list) else []
+    rows: list[str] = []
+    for item in [*reports, *shared_reports]:
+        if not isinstance(item, dict):
+            continue
+        links = item.get("links") if isinstance(item.get("links"), dict) else {}
+        rendered = str(links.get("rendered") or "")
+        raw = str(links.get("raw") or "")
+        if not rendered:
+            continue
+        kind = str(item.get("kind") or "")
+        label = str(item.get("label") or "Report")
+        scope = str(item.get("scope") or "-")
+        stamp = str(item.get("timestamp_label") or "-")
+        stamp_iso = str(item.get("modified_at") or "")
+        dev_link = ""
+        if raw and show_app_dev_ui():
+            dev_link = f' · <a href="{html.escape(raw)}">Markdown source</a>'
+        rows.append(
+            f"""
+            <article class="report-row report-browser-item"
+                data-kind="{html.escape(kind)}"
+                data-label="{html.escape(label.lower())}"
+                data-scope="{html.escape(scope.lower())}"
+                data-ts="{html.escape(stamp_iso)}">
+              <div>
+                <span class="pill">{html.escape(label)}</span>
+                <h3><a href="{html.escape(rendered)}">{html.escape(str(item.get("name") or "-"))}</a></h3>
+                <p>{html.escape(scope)}</p>
+              </div>
+              <div class="meta-stack">
+                <span>{html.escape(stamp)}</span>
+                <div class="report-browser-links">
+                  <a href="{html.escape(rendered)}">Open</a>{dev_link}
+                </div>
+              </div>
+            </article>
+            """
+        )
+    if not rows:
+        return (
+            f'<p class="empty-state">No reports yet.</p>'
+            f'<p class="empty-cta"><a href="/actions?user_id={quote(user_id)}">Generate digest or alerts</a></p>'
+        )
+    return (
+        '<div class="reports-browser-toolbar">'
+        '<label>Sort <select id="reports-sort">'
+        '<option value="newest">Newest first</option>'
+        '<option value="oldest">Oldest first</option>'
+        '<option value="label">By type</option>'
+        '</select></label>'
+        '<label>Filter <input id="reports-filter" type="search" placeholder="digest, signal, daily..."></label>'
+        '</div>'
+        f'<div id="reports-browser-list" class="report-list">{"".join(rows)}</div>'
+    )
 
 
 def render_signals_inbox(
