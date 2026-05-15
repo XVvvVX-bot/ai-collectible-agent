@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import html
+import io
 import json
 import os
 import re
 import sqlite3
 import sys
+import zipfile
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +42,16 @@ REPORT_PATTERNS = (
 )
 DEFAULT_DASHBOARD_USER_ID = os.getenv("APP_DEFAULT_USER_ID") or "demo_u_v2_curated"
 DEFAULT_INTEREST_REFRESH_LOOKBACK_HOURS = int(os.getenv("APP_DAILY_LOOKBACK_HOURS", "24"))
+RAW_MARKET_EXPORT_TABLES = (
+    ("zhao_v2_auction_raw", "raw API auction snapshots"),
+    ("zhao_v2_auction_change_raw", "raw API status-change snapshots"),
+    ("zhao_v2_sync_runs", "sync run metadata"),
+    ("zhao_v2_sync_run_pages", "sync page metadata"),
+    ("zhao_v2_sync_state", "incremental sync cursor state"),
+    ("market_listing_events_v2", "normalized listing event stream"),
+    ("market_listing_media_v2", "listing media URLs"),
+    ("market_listings_norm_v2", "current normalized market listing view"),
+)
 
 
 def main() -> int:
@@ -393,6 +406,7 @@ def build_handler(
                         render_action_result_html(
                             db_path=db_path,
                             reports_dir=reports_dir,
+                            exports_dir=exports_dir,
                             user_id=user_id,
                             action_name=action_name,
                             lookback_hours=parse_int_param(form, "lookback_hours", default=default_lookback_hours),
@@ -1626,6 +1640,86 @@ def run_digest_payload(
     }
 
 
+def export_raw_market_data(*, db_path: Path, exports_dir: Path) -> dict[str, object]:
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%z")
+    output_path = exports_dir / f"v2_raw_market_data_{timestamp}.zip"
+    manifest_tables: list[dict[str, object]] = []
+    total_rows = 0
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        with zipfile.ZipFile(output_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for table_name, description in RAW_MARKET_EXPORT_TABLES:
+                if not sqlite_table_exists(conn, table_name):
+                    manifest_tables.append(
+                        {
+                            "name": table_name,
+                            "description": description,
+                            "included": False,
+                            "row_count": 0,
+                            "reason": "table_not_found",
+                        }
+                    )
+                    continue
+
+                row_count = write_table_csv_to_zip(conn, archive, table_name)
+                total_rows += row_count
+                manifest_tables.append(
+                    {
+                        "name": table_name,
+                        "description": description,
+                        "included": True,
+                        "row_count": row_count,
+                        "path": f"{table_name}.csv",
+                    }
+                )
+
+            manifest = {
+                "ok": True,
+                "created_at": datetime.now(UTC).isoformat(),
+                "source_db_path": str(db_path),
+                "tables": manifest_tables,
+                "total_rows": total_rows,
+            }
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+
+    return {
+        "ok": True,
+        "name": output_path.name,
+        "output_path": str(output_path),
+        "download_url": f"/downloads/{quote(output_path.name)}",
+        "size_bytes": output_path.stat().st_size,
+        "table_count": sum(1 for row in manifest_tables if row.get("included")),
+        "total_rows": total_rows,
+        "tables": manifest_tables,
+    }
+
+
+def sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def write_table_csv_to_zip(conn: sqlite3.Connection, archive: zipfile.ZipFile, table_name: str) -> int:
+    column_rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    columns = [str(row["name"]) for row in column_rows]
+    row_count = 0
+    with archive.open(f"{table_name}.csv", mode="w") as raw_file:
+        text_file = io.TextIOWrapper(raw_file, encoding="utf-8", newline="")
+        writer = csv.writer(text_file)
+        writer.writerow(columns)
+        cursor = conn.execute(f"SELECT * FROM {table_name}")
+        for row in cursor:
+            writer.writerow(["" if row[column] is None else row[column] for column in columns])
+            row_count += 1
+        text_file.flush()
+    return row_count
+
+
 def run_interest_refresh_payload(db_path: Path, *, user_id: str, lookback_hours: int) -> dict[str, object]:
     matching_payload = run_matching_payload(db_path, user_id=user_id, only_active_listings=True)
     signals_payload = run_signals_payload(db_path, user_id=user_id, lookback_hours=lookback_hours)
@@ -2173,6 +2267,16 @@ def render_actions_html(
           <button type="submit">Refresh digest</button>
         </form>
       </article>
+      <article class="action-card">
+        <span class="eyebrow">Export</span>
+        <h3>Download Raw Market Data</h3>
+        <p>Create a zip export from the Render database with raw auction snapshots, change events, sync metadata, media URLs, and the current normalized listing view.</p>
+        <form method="post" action="/actions/run">
+          <input type="hidden" name="user_id" value="{html.escape(user_id)}">
+          <input type="hidden" name="action" value="raw_market_export">
+          <button type="submit">Create raw data zip</button>
+        </form>
+      </article>
     </section>
     <section class="section">
       <div class="section-header">
@@ -2195,6 +2299,7 @@ def render_action_result_html(
     *,
     db_path: Path,
     reports_dir: Path,
+    exports_dir: Path,
     user_id: str,
     action_name: str,
     lookback_hours: int,
@@ -2246,6 +2351,22 @@ def render_action_result_html(
                 f'<a href="{html.escape(str(report.get("rendered") or "/"))}">Open rendered digest</a>',
                 f'<a href="{html.escape(str(report.get("raw") or "/"))}">Open raw markdown</a>',
                 f'<a href="/actions?user_id={quote(user_id)}">Back to actions</a>',
+            ]
+        )
+    elif action_name == "raw_market_export":
+        payload = export_raw_market_data(db_path=db_path, exports_dir=exports_dir)
+        title = "Raw Market Export Ready"
+        summary_bits = [
+            f"file <code>{html.escape(str(payload.get('name') or '-'))}</code>",
+            f"tables <code>{html.escape(str(payload.get('table_count') or 0))}</code>",
+            f"rows <code>{html.escape(str(payload.get('total_rows') or 0))}</code>",
+            f"size <code>{html.escape(format_size(int(payload.get('size_bytes') or 0)))}</code>",
+        ]
+        links_html = "".join(
+            [
+                f'<a href="{html.escape(str(payload.get("download_url") or "/"))}">Download zip</a>',
+                f'<a href="/actions?user_id={quote(user_id)}">Back to actions</a>',
+                f'<a href="/?user_id={quote(user_id)}">Back to dashboard</a>',
             ]
         )
     else:

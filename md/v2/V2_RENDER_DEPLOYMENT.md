@@ -19,6 +19,7 @@ The current Render service:
 - stores the current V2 SQLite database on the attached Render disk
 - serves the collector dashboard and report pages over HTTP
 - exposes the thin V2 API
+- creates browser-triggered report/raw-market download bundles under `runtime/exports`
 - keeps the live incremental and daily review/report loops running in a background thread
 
 ## Current Render Files
@@ -156,6 +157,8 @@ The Render service now exposes:
 - `/reports/<filename>`
 - `/raw/<filename>`
 - `/downloads/<bundle-name>`
+- `/actions`
+- `/actions/run`
 
 ### JSON API
 
@@ -199,6 +202,25 @@ python scripts_v2/reporting/package_v2_reports.py --reports-dir /opt/render/proj
 That creates a zip like:
 
 - `/opt/render/project/src/runtime/exports/v2_reports_bundle_<timestamp>.zip`
+
+## Downloading Raw Market Data
+
+The current Render service can export market data from the live SQLite DB through the browser.
+
+Use:
+
+- `/actions?user_id=demo_u_v2_curated`
+- `Download Raw Market Data`
+
+The action creates:
+
+- `/opt/render/project/src/runtime/exports/v2_raw_market_data_<timestamp>.zip`
+
+The zip is downloadable through:
+
+- `/downloads/v2_raw_market_data_<timestamp>.zip`
+
+It includes raw API snapshots, raw change snapshots, sync metadata, normalized listing events, media URLs, and the current normalized listing view as CSV files plus `manifest.json`.
 
 ## Current Known Limitations
 

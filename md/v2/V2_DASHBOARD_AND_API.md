@@ -7,6 +7,7 @@ This document describes the current product-facing V2 surface:
 - the Render-hosted collector dashboard
 - the built-in report browser
 - the thin HTTP API currently exposed by the same runtime
+- the browser-triggered raw market data export
 
 This is the bridge between the repo's earlier developer/report tooling and the next-stage frontend product.
 
@@ -22,6 +23,7 @@ That means one Render service currently does all of the following:
 
 - serves the dashboard and report pages
 - exposes the thin API
+- creates downloadable export bundles under `runtime/exports`
 - runs incremental sync checks
 - runs daily review/report cycles
 
@@ -29,12 +31,13 @@ This is intentionally simple for the current stage. It is not yet the final mult
 
 ## Current Product Objects
 
-The current UI and API revolve around four V2 product objects:
+The current UI and API revolve around these V2 product objects:
 
 - interests from `user_interests_v2`
 - matches from `listing_matches_v2`
 - signals from `signals_v2`
 - digest/review outputs from `reports_v2/*.md`
+- market data from raw, normalized, event, and media tables in `agent_v2.db`
 
 Those objects are the basis for the next-stage frontend.
 
@@ -54,11 +57,9 @@ Current dashboard sections:
 - summary cards
 - latest digest preview
 - latest digest / signal review / daily review shortcuts
-- priority interests
-- user-scoped report list
-- shared daily report list
-- bundle downloads
-- live API links
+- top signals
+- top opportunity groups
+- collapsed developer/operator links
 
 Current default dashboard user:
 
@@ -76,8 +77,11 @@ The built-in web service currently serves:
 - `/reports/<filename>`
 - `/raw/<filename>`
 - `/downloads/<bundle-name>`
+- `/actions`
+- `/actions/run`
 
 `/latest/<kind>` is a convenience redirect for the newest report of a given type.
+`/actions` exposes browser-triggered operator workflows, including raw market export creation.
 
 ## Current API Routes
 
@@ -157,6 +161,38 @@ Wraps:
 - `run_interest_signal_generation(...)`
 
 Returns the structured signal-generation result.
+
+## Raw Market Data Export
+
+The Actions page includes `Download Raw Market Data`.
+
+Form action:
+
+- `POST /actions/run`
+- form field `action=raw_market_export`
+
+The action creates a zip file under:
+
+- `runtime/exports/v2_raw_market_data_<timestamp>.zip`
+
+The result page links to:
+
+- `/downloads/v2_raw_market_data_<timestamp>.zip`
+
+The zip contains CSV files for:
+
+- `zhao_v2_auction_raw`
+- `zhao_v2_auction_change_raw`
+- `zhao_v2_sync_runs`
+- `zhao_v2_sync_run_pages`
+- `zhao_v2_sync_state`
+- `market_listing_events_v2`
+- `market_listing_media_v2`
+- `market_listings_norm_v2`
+
+It also includes `manifest.json` with the export timestamp, included tables, and row counts.
+
+This is meant for local analysis and backup workflows. It is not a replacement for a managed database backup.
 
 ## Why The API Is Thin
 
